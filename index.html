@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DataLens — JSON & XML Inspector</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <header>
+    <div class="logo">
+      <span class="logo-icon">⬡</span>
+      <span class="logo-text">DataLens</span>
+      <span class="logo-tag">JSON · XML Inspector</span>
+    </div>
+    <div class="header-controls">
+      <div class="indent-group">
+        <span class="control-label">INDENT</span>
+        <button class="pill-btn active" data-indent="2" id="indent2">2</button>
+        <button class="pill-btn" data-indent="4" id="indent4">4</button>
+      </div>
+      <div class="view-group">
+        <button class="pill-btn active" id="viewTree" data-view="tree">Tree</button>
+        <button class="pill-btn" id="viewText" data-view="text">Text</button>
+      </div>
+      <div class="minify-group">
+        <button class="pill-btn" id="toggleMinify">Minify</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="workspace">
+
+    <!-- LEFT PANEL -->
+    <div class="panel panel-input">
+      <div class="panel-header">
+        <div class="panel-title">
+          <span class="dot dot-input"></span>
+          INPUT
+          <span class="format-badge" id="formatBadge">—</span>
+        </div>
+        <div class="panel-actions">
+          <button class="icon-btn" id="clearBtn" title="Clear input">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4h12M5 4V2.5A.5.5 0 015.5 2h5a.5.5 0 01.5.5V4M6 7v5M10 7v5M3 4l.8 9.1A.5.5 0 004.3 14h7.4a.5.5 0 00.5-.9L13 4"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="textarea-wrap">
+        <textarea id="inputArea" spellcheck="false" placeholder="Paste JSON or XML here…&#10;&#10;{  }   or   <root />"></textarea>
+        <div class="error-banner" id="errorBanner" style="display:none"></div>
+      </div>
+      <div class="panel-footer">
+        <span class="char-count" id="charCount">0 chars</span>
+        <button class="action-btn" id="parseBtn">
+          <span>Parse</span>
+          <kbd>⌘↵</kbd>
+        </button>
+      </div>
+    </div>
+
+    <!-- DIVIDER -->
+    <div class="divider">
+      <div class="divider-line"></div>
+    </div>
+
+    <!-- RIGHT PANEL -->
+    <div class="panel panel-output">
+      <div class="panel-header">
+        <div class="panel-title">
+          <span class="dot dot-output"></span>
+          OUTPUT
+        </div>
+        <div class="panel-actions">
+          <div class="search-wrap">
+            <svg class="search-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="6.5" cy="6.5" r="4"/><path d="M10.5 10.5L14 14"/></svg>
+            <input type="text" id="searchInput" placeholder="Search keys / values…" />
+            <span class="match-count" id="matchCount"></span>
+          </div>
+          <button class="icon-btn" id="expandAllBtn" title="Expand all">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 6l5 5 5-5"/><path d="M3 2h10"/><path d="M3 14h10"/></svg>
+          </button>
+          <button class="icon-btn" id="collapseAllBtn" title="Collapse all">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 10l5-5 5 5"/><path d="M3 2h10"/><path d="M3 14h10"/></svg>
+          </button>
+          <button class="icon-btn" id="copyBtn" title="Copy output">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="9" height="9" rx="1"/><path d="M2 11V3a1 1 0 011-1h8"/></svg>
+          </button>
+          <button class="icon-btn" id="downloadBtn" title="Download">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 2v8M5 7l3 3 3-3"/><path d="M2 13h12"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="output-wrap" id="outputWrap">
+        <div class="empty-state" id="emptyState">
+          <div class="empty-icon">◈</div>
+          <div class="empty-text">Paste data on the left and hit Parse</div>
+          <div class="empty-hint">Supports JSON objects, arrays, and XML documents</div>
+        </div>
+        <div id="treeOutput" class="tree-output" style="display:none"></div>
+        <pre id="textOutput" class="text-output" style="display:none"></pre>
+      </div>
+      <div class="panel-footer">
+        <span class="node-count" id="nodeCount"></span>
+        <span class="copy-toast" id="copyToast">Copied!</span>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
