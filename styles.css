@@ -577,6 +577,63 @@ textarea::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3
   min-width: 24px;
 }
 
+/* ── Block headers (multi-block output) ────────────── */
+.block-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px 6px 16px;
+  background: var(--bg2);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.block-type-tag {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  padding: 2px 7px;
+  border-radius: 3px;
+  font-family: var(--font-ui);
+}
+.block-type-tag.json { background: rgba(246,166,35,0.15); color: var(--amber); border: 1px solid rgba(246,166,35,0.3); }
+.block-type-tag.xml  { background: rgba(62,217,217,0.12); color: var(--cyan);  border: 1px solid rgba(62,217,217,0.3); }
+
+.block-label {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text3);
+  letter-spacing: 0.03em;
+}
+
+.block-wrap { padding-left: 12px; }
+
+.block-separator {
+  height: 1px;
+  background: var(--border);
+  margin: 10px 16px;
+}
+
+.block-hdr-text {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  margin-bottom: 4px;
+  padding: 3px 8px;
+  border-radius: 3px;
+  font-family: var(--font-ui);
+}
+.block-hdr-text.json { color: var(--amber); }
+.block-hdr-text.xml  { color: var(--cyan);  }
+
+/* mixed badge */
+.format-badge.mixed { color: var(--pink); border-color: var(--pink); }
+
 /* ── Responsive fallback ───────────────────────────── */
 @media (max-width: 700px) {
   .workspace { flex-direction: column; }

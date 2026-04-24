@@ -1,14 +1,13 @@
 /* ═══════════════════════════════════════════════════════
-   DataLens — JSON & XML Inspector
+   DataLens — JSON & XML Inspector  (resilient multi-block)
    ═══════════════════════════════════════════════════════ */
 
 'use strict';
 
 /* ── State ─────────────────────────────────────────── */
 const state = {
-  parsed:   null,      // parsed JS object
-  format:   null,      // 'json' | 'xml'
-  view:     'tree',    // 'tree' | 'text'
+  blocks:   [],        // array of { type:'json'|'xml', label, data }
+  view:     'tree',
   indent:   2,
   minified: false,
   searchTerm: '',
@@ -16,151 +15,305 @@ const state = {
 
 /* ── DOM refs ──────────────────────────────────────── */
 const $ = id => document.getElementById(id);
-const inputArea     = $('inputArea');
-const parseBtn      = $('parseBtn');
-const clearBtn      = $('clearBtn');
-const formatBadge   = $('formatBadge');
-const charCount     = $('charCount');
-const errorBanner   = $('errorBanner');
-const treeOutput    = $('treeOutput');
-const textOutput    = $('textOutput');
-const emptyState    = $('emptyState');
-const outputWrap    = $('outputWrap');
-const nodeCount     = $('nodeCount');
-const copyBtn       = $('copyBtn');
-const downloadBtn   = $('downloadBtn');
-const expandAllBtn  = $('expandAllBtn');
-const collapseAllBtn= $('collapseAllBtn');
-const searchInput   = $('searchInput');
-const matchCount    = $('matchCount');
-const copyToast     = $('copyToast');
-const indent2Btn    = $('indent2');
-const indent4Btn    = $('indent4');
-const viewTreeBtn   = $('viewTree');
-const viewTextBtn   = $('viewText');
-const toggleMinify  = $('toggleMinify');
+const inputArea      = $('inputArea');
+const parseBtn       = $('parseBtn');
+const clearBtn       = $('clearBtn');
+const formatBadge    = $('formatBadge');
+const charCount      = $('charCount');
+const errorBanner    = $('errorBanner');
+const treeOutput     = $('treeOutput');
+const textOutput     = $('textOutput');
+const emptyState     = $('emptyState');
+const nodeCount      = $('nodeCount');
+const copyBtn        = $('copyBtn');
+const downloadBtn    = $('downloadBtn');
+const expandAllBtn   = $('expandAllBtn');
+const collapseAllBtn = $('collapseAllBtn');
+const searchInput    = $('searchInput');
+const matchCount     = $('matchCount');
+const copyToast      = $('copyToast');
+const indent2Btn     = $('indent2');
+const indent4Btn     = $('indent4');
+const viewTreeBtn    = $('viewTree');
+const viewTextBtn    = $('viewText');
+const toggleMinify   = $('toggleMinify');
 
 /* ══════════════════════════════════════════════════════
-   MODULE: Format Detection
-   ══════════════════════════════════════════════════════ */
-function detectFormat(src) {
-  const trimmed = src.trim();
-  if (!trimmed) return null;
-  if (trimmed[0] === '{' || trimmed[0] === '[') return 'json';
-  if (trimmed[0] === '<') return 'xml';
-  // fallback: try both
-  try { JSON.parse(trimmed); return 'json'; } catch {}
-  try {
-    const doc = new DOMParser().parseFromString(trimmed, 'text/xml');
-    if (!doc.querySelector('parsererror')) return 'xml';
-  } catch {}
+   MODULE: Resilient Multi-Block Extractor
+   Scans the raw input string and pulls out every
+   JSON object/array and XML document it can find,
+   regardless of surrounding noise / extra text.
+   Returns: { blocks: [{type, label, data}], warnings: [str] }
+══════════════════════════════════════════════════════ */
+function extractBlocks(src) {
+  const blocks   = [];
+  const warnings = [];
+  let   pos      = 0;
+  let   blockIdx = 0;
+
+  while (pos < src.length) {
+    // Skip whitespace
+    while (pos < src.length && /\s/.test(src[pos])) pos++;
+    if (pos >= src.length) break;
+
+    const ch = src[pos];
+
+    /* ── JSON object or array ──────────────────────── */
+    if (ch === '{' || ch === '[') {
+      const pair = ch === '{' ? ['{','}'] : ['[',']'];
+      const { text: rawText, end, error } = extractBalanced(src, pos, pair);
+      const rawSlice = src.slice(pos, end);
+
+      if (error) {
+        const partial = tryRepairJSON(rawSlice);
+        if (partial !== null) {
+          blockIdx++;
+          blocks.push({ type:'json', label:`JSON #${blockIdx} (repaired)`, data: partial });
+          warnings.push(`JSON block at pos ${pos} was incomplete — partially recovered.`);
+        } else {
+          warnings.push(`Unparseable JSON block at pos ${pos} — skipped.`);
+        }
+      } else {
+        try {
+          const parsed = JSON.parse(rawSlice);
+          blockIdx++;
+          blocks.push({ type:'json', label:`JSON #${blockIdx}`, data: parsed });
+        } catch {
+          const repaired = tryRepairJSON(rawSlice);
+          if (repaired !== null) {
+            blockIdx++;
+            blocks.push({ type:'json', label:`JSON #${blockIdx} (repaired)`, data: repaired });
+            warnings.push(`JSON block at pos ${pos} had minor issues and was auto-repaired.`);
+          } else {
+            warnings.push(`Invalid JSON at pos ${pos} — skipped.`);
+          }
+        }
+      }
+      pos = end;
+      continue;
+    }
+
+    /* ── XML processing instruction / comment — skip ─ */
+    if (src.startsWith('<?', pos)) {
+      const ci = src.indexOf('?>', pos + 2);
+      pos = ci === -1 ? src.length : ci + 2;
+      continue;
+    }
+    if (src.startsWith('<!--', pos)) {
+      const ci = src.indexOf('-->', pos + 4);
+      pos = ci === -1 ? src.length : ci + 3;
+      continue;
+    }
+
+    /* ── XML element ───────────────────────────────── */
+    if (ch === '<') {
+      const xmlChunk = extractXMLChunk(src, pos);
+      if (xmlChunk === null) {
+        warnings.push(`Unexpected '<' at pos ${pos} — not a valid XML tag, skipped.`);
+        pos++;
+        continue;
+      }
+
+      try {
+        const parser = new DOMParser();
+        const doc    = parser.parseFromString(xmlChunk.text, 'text/xml');
+        const errEl  = doc.querySelector('parsererror');
+        if (errEl) {
+          const partial = tryRepairXML(xmlChunk.text);
+          if (partial) {
+            blockIdx++;
+            blocks.push({ type:'xml', label:`XML #${blockIdx} (repaired)`, data: partial });
+            warnings.push(`XML block at pos ${pos} had errors — partially recovered.`);
+          } else {
+            warnings.push(`Invalid XML at pos ${pos}: ${errEl.textContent.split('\n')[0]} — skipped.`);
+          }
+        } else {
+          const converted = xmlToJson(doc);
+          blockIdx++;
+          blocks.push({ type:'xml', label:`XML #${blockIdx}`, data: converted });
+        }
+      } catch (e) {
+        warnings.push(`XML parse exception at pos ${pos}: ${e.message} — skipped.`);
+      }
+      pos = xmlChunk.end;
+      continue;
+    }
+
+    /* ── Non-data characters — skip to next starter ── */
+    const next = findNextStarter(src, pos + 1);
+    if (next === -1) break;
+    pos = next;
+  }
+
+  return { blocks, warnings };
+}
+
+/* ── Helper: extract balanced {…} or […] ────────────── */
+function extractBalanced(src, start, [open, close]) {
+  let depth = 0, inStr = false, i = start;
+  while (i < src.length) {
+    const c = src[i];
+    if (inStr) {
+      if (c === '\\') { i += 2; continue; }
+      if (c === '"')  inStr = false;
+    } else {
+      if (c === '"')        inStr = true;
+      else if (c === open)  depth++;
+      else if (c === close) { depth--; if (depth === 0) return { end: i+1, error: false }; }
+    }
+    i++;
+  }
+  return { end: i, error: true };
+}
+
+/* ── Helper: find next { [ < ────────────────────────── */
+function findNextStarter(src, from) {
+  for (let i = from; i < src.length; i++) {
+    if (src[i] === '{' || src[i] === '[' || src[i] === '<') return i;
+  }
+  return -1;
+}
+
+/* ── Helper: extract XML chunk starting at pos ──────── */
+function extractXMLChunk(src, pos) {
+  const tagMatch = src.slice(pos).match(/^<([A-Za-z_][\w:.-]*)/);
+  if (!tagMatch) return null;
+  const rootTag = tagMatch[1];
+
+  // Self-closing?
+  const selfClose = src.slice(pos).match(/^<[^>]*\/>/);
+  if (selfClose) return { text: selfClose[0], end: pos + selfClose[0].length };
+
+  // Walk to find matching close tag
+  const closeStr = `</${rootTag}`;
+  const openRe   = new RegExp(`<${escapeRe(rootTag)}(?:[\\s>])`, 'g');
+  const closeRe  = new RegExp(`</${escapeRe(rootTag)}\\s*>`, 'g');
+  const seg      = src.slice(pos);
+  let depth      = 0, cursor = 0;
+
+  while (cursor < seg.length) {
+    openRe.lastIndex  = cursor;
+    closeRe.lastIndex = cursor;
+    const om = openRe.exec(seg);
+    const cm = closeRe.exec(seg);
+
+    if (!cm) return { text: seg, end: src.length };
+
+    if (!om || cm.index < om.index) {
+      depth--;
+      cursor = cm.index + cm[0].length;
+      if (depth <= 0) return { text: seg.slice(0, cursor), end: pos + cursor };
+    } else {
+      depth++;
+      cursor = om.index + om[0].length;
+    }
+  }
+  return { text: seg, end: src.length };
+}
+
+function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+/* ── JSON repair: trailing commas, single quotes ────── */
+function tryRepairJSON(str) {
+  let s = str.trim();
+  s = s.replace(/,\s*([}\]])/g, '$1');          // trailing commas
+  s = s.replace(/'([^'\\]*(\\.[^'\\]*)*)'/g,   // single → double quotes
+    (_, inner) => `"${inner}"`);
+  try { return JSON.parse(s); } catch { return null; }
+}
+
+/* ── XML repair: walk back line by line ─────────────── */
+function tryRepairXML(str) {
+  const lines = str.split('\n');
+  for (let i = lines.length - 1; i > 0; i--) {
+    const attempt = lines.slice(0, i).join('\n').trim();
+    if (!attempt) continue;
+    const doc = new DOMParser().parseFromString(attempt, 'text/xml');
+    if (!doc.querySelector('parsererror')) return xmlToJson(doc);
+  }
   return null;
 }
 
 /* ══════════════════════════════════════════════════════
-   MODULE: JSON Parsing
-   ══════════════════════════════════════════════════════ */
-function parseJSON(src) {
-  return JSON.parse(src.trim());
-}
-
-/* ══════════════════════════════════════════════════════
-   MODULE: XML Parsing & Conversion
-   ══════════════════════════════════════════════════════ */
-function parseXML(src) {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(src.trim(), 'text/xml');
-  const err = doc.querySelector('parsererror');
-  if (err) throw new Error(err.textContent.split('\n')[0]);
-  return doc;
-}
-
+   MODULE: XML → JSON
+══════════════════════════════════════════════════════ */
 function xmlToJson(node) {
-  // Text node
   if (node.nodeType === Node.TEXT_NODE) {
-    const val = node.nodeValue.trim();
-    return val.length ? val : undefined;
+    const v = node.nodeValue.trim();
+    return v.length ? v : undefined;
   }
+  if (node.nodeType === Node.CDATA_SECTION_NODE) return node.nodeValue;
 
-  // CDATA section
-  if (node.nodeType === Node.CDATA_SECTION_NODE) {
-    return node.nodeValue;
-  }
-
-  // Element node
   if (node.nodeType === Node.ELEMENT_NODE) {
     const obj = {};
-
-    // Attributes
     if (node.attributes.length > 0) {
       obj['@attributes'] = {};
-      for (const attr of node.attributes) {
-        obj['@attributes'][attr.name] = attr.value;
-      }
+      for (const a of node.attributes) obj['@attributes'][a.name] = a.value;
     }
+    const kids     = Array.from(node.childNodes);
+    const elemKids = kids.filter(n => n.nodeType === Node.ELEMENT_NODE);
+    const textKids = kids.filter(n => n.nodeType === Node.TEXT_NODE || n.nodeType === Node.CDATA_SECTION_NODE);
 
-    // Children
-    const children = Array.from(node.childNodes);
-    const elemChildren = children.filter(n => n.nodeType === Node.ELEMENT_NODE);
-    const textChildren = children.filter(n =>
-      n.nodeType === Node.TEXT_NODE || n.nodeType === Node.CDATA_SECTION_NODE
-    );
-
-    // Pure text node
-    if (elemChildren.length === 0 && textChildren.length > 0) {
-      const text = textChildren.map(n => n.nodeValue.trim()).join('').trim();
+    if (elemKids.length === 0 && textKids.length > 0) {
+      const text = textKids.map(n => n.nodeValue.trim()).join('').trim();
       if (text) {
-        if (Object.keys(obj).length > 0) {
-          obj['#text'] = text;
-        } else {
-          return text;
-        }
+        if (Object.keys(obj).length > 0) { obj['#text'] = text; }
+        else return text;
       }
       return Object.keys(obj).length ? obj : undefined;
     }
 
-    // Group repeated tag names into arrays
     const tagCounts = {};
-    for (const c of elemChildren) {
-      tagCounts[c.tagName] = (tagCounts[c.tagName] || 0) + 1;
+    for (const c of elemKids) tagCounts[c.tagName] = (tagCounts[c.tagName] || 0) + 1;
+    for (const c of elemKids) {
+      const tag = c.tagName, val = xmlToJson(c);
+      if (tagCounts[tag] > 1) { if (!obj[tag]) obj[tag] = []; obj[tag].push(val); }
+      else obj[tag] = val;
     }
-
-    for (const child of elemChildren) {
-      const tag = child.tagName;
-      const val = xmlToJson(child);
-      if (tagCounts[tag] > 1) {
-        if (!obj[tag]) obj[tag] = [];
-        obj[tag].push(val);
-      } else {
-        obj[tag] = val;
-      }
-    }
-
     return Object.keys(obj).length ? obj : undefined;
   }
 
-  // Document node — recurse into root element
   if (node.nodeType === Node.DOCUMENT_NODE) {
     const root = node.documentElement;
-    const result = {};
-    result[root.tagName] = xmlToJson(root);
-    return result;
+    return { [root.tagName]: xmlToJson(root) };
   }
-
   return undefined;
 }
 
 /* ══════════════════════════════════════════════════════
    MODULE: Tree Renderer
-   ══════════════════════════════════════════════════════ */
-
+══════════════════════════════════════════════════════ */
 let totalNodes = 0;
 
-function renderTree(data, container) {
+function renderTree(blocks, container) {
   totalNodes = 0;
   container.innerHTML = '';
-  const rootNode = buildNode(data, null, 0, true, 'root');
-  container.appendChild(rootNode);
+
+  blocks.forEach((block, bi) => {
+    const header  = document.createElement('div');
+    header.className = 'block-header';
+    const typeTag = document.createElement('span');
+    typeTag.className = `block-type-tag ${block.type}`;
+    typeTag.textContent = block.type.toUpperCase();
+    const labelEl = document.createElement('span');
+    labelEl.className = 'block-label';
+    labelEl.textContent = block.label;
+    header.appendChild(typeTag);
+    header.appendChild(labelEl);
+    container.appendChild(header);
+
+    const blockWrap = document.createElement('div');
+    blockWrap.className = 'block-wrap';
+    blockWrap.appendChild(buildNode(block.data, null, 0, true, 'root'));
+    container.appendChild(blockWrap);
+
+    if (bi < blocks.length - 1) {
+      const sep = document.createElement('div');
+      sep.className = 'block-separator';
+      container.appendChild(sep);
+    }
+  });
+
   nodeCount.textContent = `${totalNodes.toLocaleString()} node${totalNodes !== 1 ? 's' : ''}`;
 }
 
@@ -175,26 +328,19 @@ function buildNode(value, key, depth, isLast, keyType) {
 
   const row = document.createElement('div');
   row.className = 'tree-row';
+  row.appendChild(buildIndent(depth, isLast));
 
-  // Indent lines
-  const indent = buildIndent(depth, isLast);
-  row.appendChild(indent);
-
-  // Toggle button (only for non-empty objects/arrays)
-  let childrenEl = null;
-  let toggleBtn  = null;
+  let childrenEl = null, toggleBtn = null;
   if (isObject && !isEmpty) {
     toggleBtn = document.createElement('span');
     toggleBtn.className = 'toggle-btn expanded';
     row.appendChild(toggleBtn);
   } else {
-    const spacer = document.createElement('span');
-    spacer.style.display = 'inline-block';
-    spacer.style.width = '22px';
-    row.appendChild(spacer);
+    const sp = document.createElement('span');
+    sp.style.cssText = 'display:inline-block;width:22px;flex-shrink:0';
+    row.appendChild(sp);
   }
 
-  // Key label
   if (key !== null) {
     const keyEl = document.createElement('span');
     keyEl.className = 'tree-key';
@@ -202,35 +348,26 @@ function buildNode(value, key, depth, isLast, keyType) {
     if (keyType === 'text')  keyEl.classList.add('text-key');
     if (keyType === 'index') keyEl.classList.add('index-key');
     keyEl.dataset.raw = key;
-
-    if (keyType === 'attr')  keyEl.textContent = `@${key}`;
-    else if (keyType === 'text') keyEl.textContent = '#text';
-    else keyEl.textContent = isArray ? `[${key}]` : (keyType === 'index' ? `[${key}]` : key);
-
+    keyEl.textContent = keyType === 'attr' ? `@${key}`
+                      : keyType === 'text'  ? '#text'
+                      : keyType === 'index' ? `[${key}]`
+                      : key;
     row.appendChild(keyEl);
-
     const colon = document.createElement('span');
-    colon.className = 'tree-colon';
-    colon.textContent = ':';
+    colon.className = 'tree-colon'; colon.textContent = ':';
     row.appendChild(colon);
   }
 
-  // Value or summary
   if (isObject && !isEmpty) {
-    const meta = document.createElement('span');
+    const count = Object.keys(value).length;
+    const meta  = document.createElement('span');
     meta.className = 'tree-meta';
-    const keys = Object.keys(value);
-    const count = keys.length;
-    if (isArray) {
-      meta.textContent = `Array(${count})`;
-    } else {
-      meta.textContent = `{${count} key${count !== 1 ? 's' : ''}}`;
-    }
+    meta.textContent = isArray ? `Array(${count})` : `{${count} key${count !== 1 ? 's' : ''}}`;
     row.appendChild(meta);
   } else if (isObject && isEmpty) {
     const meta = document.createElement('span');
     meta.className = 'tree-meta';
-    meta.textContent = isArray ? '[]' : '{}';
+    meta.textContent = isArray ? '[ ]' : '{ }';
     row.appendChild(meta);
   } else {
     const valEl = document.createElement('span');
@@ -244,77 +381,57 @@ function buildNode(value, key, depth, isLast, keyType) {
 
   wrapper.appendChild(row);
 
-  // Children
   if (isObject && !isEmpty) {
     childrenEl = document.createElement('div');
-    childrenEl.className = 'tree-children expanding';
+    childrenEl.className = 'tree-children';
 
-    const entries = Object.entries(value);
-    const parentIsArray = isArray;
+    Object.entries(value).forEach(([k, v], i, arr) => {
+      const last  = i === arr.length - 1;
+      const kType = k === '#text' ? 'text' : isArray ? 'index' : 'normal';
 
-    entries.forEach(([k, v], i) => {
-      const last = i === entries.length - 1;
-      let kType = parentIsArray ? 'index' : 'normal';
-      if (k === '@attributes') kType = 'attrGroup';
-      else if (k === '#text')  kType = 'text';
-      // Detect attr keys inside @attributes
-      let childNode;
       if (k === '@attributes' && v !== null && typeof v === 'object') {
-        // render attrs inline as children
-        const attrWrapper = document.createElement('div');
-        attrWrapper.className = 'tree-node';
+        const attrW   = document.createElement('div');
+        attrW.className = 'tree-node';
         const attrRow = document.createElement('div');
         attrRow.className = 'tree-row';
-        const attrIndent = buildIndent(depth + 1, last);
-        attrRow.appendChild(attrIndent);
-        const spacer = document.createElement('span');
-        spacer.style.display = 'inline-block'; spacer.style.width = '22px';
-        attrRow.appendChild(spacer);
-        const attrKeyEl = document.createElement('span');
-        attrKeyEl.className = 'tree-key attr-key';
-        attrKeyEl.textContent = '@attributes';
-        attrRow.appendChild(attrKeyEl);
-        const colon2 = document.createElement('span');
-        colon2.className = 'tree-colon'; colon2.textContent = ':';
-        attrRow.appendChild(colon2);
-        const meta2 = document.createElement('span');
-        meta2.className = 'tree-meta';
-        meta2.textContent = `{${Object.keys(v).length} attr${Object.keys(v).length !== 1 ? 's' : ''}}`;
-        attrRow.appendChild(meta2);
-        attrWrapper.appendChild(attrRow);
-
-        const attrChildren = document.createElement('div');
-        attrChildren.className = 'tree-children';
-        Object.entries(v).forEach(([ak, av], ai) => {
-          attrChildren.appendChild(buildNode(av, ak, depth + 2, ai === Object.keys(v).length - 1, 'attr'));
-        });
-        attrWrapper.appendChild(attrChildren);
-
-        // Toggle for @attributes group
+        attrRow.appendChild(buildIndent(depth + 1, last));
         const attrToggle = document.createElement('span');
         attrToggle.className = 'toggle-btn expanded';
-        attrRow.insertBefore(attrToggle, attrKeyEl);
-        attrRow.removeChild(spacer);
-        setupToggle(attrToggle, attrChildren);
+        attrRow.appendChild(attrToggle);
+        const attrKey = document.createElement('span');
+        attrKey.className = 'tree-key attr-key'; attrKey.textContent = '@attributes';
+        attrRow.appendChild(attrKey);
+        const attrColon = document.createElement('span');
+        attrColon.className = 'tree-colon'; attrColon.textContent = ':';
+        attrRow.appendChild(attrColon);
+        const ac = Object.keys(v).length;
+        const attrMeta = document.createElement('span');
+        attrMeta.className = 'tree-meta';
+        attrMeta.textContent = `{${ac} attr${ac !== 1 ? 's' : ''}}`;
+        attrRow.appendChild(attrMeta);
+        attrW.appendChild(attrRow);
 
-        childrenEl.appendChild(attrWrapper);
+        const attrKids = document.createElement('div');
+        attrKids.className = 'tree-children';
+        Object.entries(v).forEach(([ak, av], ai, aa) =>
+          attrKids.appendChild(buildNode(av, ak, depth + 2, ai === aa.length - 1, 'attr'))
+        );
+        attrW.appendChild(attrKids);
+        setupToggle(attrToggle, attrKids);
+        attrRow.style.cursor = 'pointer';
+        attrRow.addEventListener('click', e => { if (!e.target.classList.contains('toggle-btn')) attrToggle.click(); });
+        childrenEl.appendChild(attrW);
         return;
       }
-      childNode = buildNode(v, k, depth + 1, last, kType);
-      childrenEl.appendChild(childNode);
+
+      childrenEl.appendChild(buildNode(v, k, depth + 1, last, kType));
     });
 
     wrapper.appendChild(childrenEl);
-    requestAnimationFrame(() => childrenEl.classList.remove('expanding'));
-
     if (toggleBtn) {
       setupToggle(toggleBtn, childrenEl);
       row.style.cursor = 'pointer';
-      row.addEventListener('click', e => {
-        if (!e.target.classList.contains('toggle-btn')) {
-          toggleBtn.click();
-        }
-      });
+      row.addEventListener('click', e => { if (!e.target.classList.contains('toggle-btn')) toggleBtn.click(); });
     }
   }
 
@@ -334,217 +451,164 @@ function buildIndent(depth, isLast) {
 function setupToggle(btn, childrenEl) {
   btn.addEventListener('click', e => {
     e.stopPropagation();
-    const isExpanded = btn.classList.contains('expanded');
-    if (isExpanded) {
-      btn.classList.replace('expanded', 'collapsed');
+    if (btn.classList.contains('expanded')) {
+      btn.classList.replace('expanded','collapsed');
       childrenEl.classList.add('collapsed');
     } else {
-      btn.classList.replace('collapsed', 'expanded');
+      btn.classList.replace('collapsed','expanded');
       childrenEl.classList.remove('collapsed');
-      childrenEl.classList.add('expanding');
-      requestAnimationFrame(() => childrenEl.classList.remove('expanding'));
     }
   });
 }
 
 function formatPrimitive(value) {
-  if (value === null)      return { cls: 'v-null', display: 'null' };
-  if (value === undefined) return { cls: 'v-null', display: 'undefined' };
+  if (value === null || value === undefined) return { cls:'v-null', display: String(value) };
   const t = typeof value;
-  if (t === 'boolean') return { cls: 'v-bool', display: String(value) };
-  if (t === 'number')  return { cls: 'v-num',  display: String(value) };
-  // String — truncate if very long
-  const str = String(value);
-  const display = str.length > 120 ? `"${str.slice(0, 120)}…"` : `"${str}"`;
-  return { cls: 'v-str', display };
+  if (t === 'boolean') return { cls:'v-bool', display: String(value) };
+  if (t === 'number')  return { cls:'v-num',  display: String(value) };
+  const s = String(value);
+  return { cls:'v-str', display: s.length > 120 ? `"${s.slice(0,120)}…"` : `"${s}"` };
 }
 
 /* ══════════════════════════════════════════════════════
-   MODULE: Formatted Text View
-   ══════════════════════════════════════════════════════ */
-function formatOutput(data, format, indent, minified) {
-  if (minified) {
-    return JSON.stringify(data);
-  }
-  const str = JSON.stringify(data, null, indent);
-  return syntaxHighlightJSON(str);
+   MODULE: Text View + Syntax Highlighting
+══════════════════════════════════════════════════════ */
+function renderTextView(blocks) {
+  textOutput.innerHTML = blocks.map(b =>
+    `<span class="block-hdr-text ${b.type}">${esc(b.label)}</span>\n` +
+    (state.minified
+      ? esc(JSON.stringify(b.data))
+      : syntaxHighlightJSON(JSON.stringify(b.data, null, state.indent)))
+  ).join('\n\n');
 }
 
 function syntaxHighlightJSON(str) {
-  // Token-based syntax highlighting
-  let out = '';
-  let i = 0;
+  let out = '', i = 0;
   const n = str.length;
-
   while (i < n) {
     const ch = str[i];
-
-    // String
     if (ch === '"') {
       let j = i + 1;
       while (j < n) {
         if (str[j] === '\\') { j += 2; continue; }
-        if (str[j] === '"') { j++; break; }
+        if (str[j] === '"')  { j++; break; }
         j++;
       }
       const raw = str.slice(i, j);
-      // Is this a key? Look ahead for colon
       let k = j;
-      while (k < n && (str[k] === ' ' || str[k] === '\n' || str[k] === '\r')) k++;
-      if (str[k] === ':') {
-        out += `<span class="s-key">${esc(raw)}</span>`;
-      } else {
-        out += `<span class="s-str">${esc(raw)}</span>`;
-      }
-      i = j;
-      continue;
+      while (k < n && /[ \n\r]/.test(str[k])) k++;
+      out += str[k] === ':' ? `<span class="s-key">${esc(raw)}</span>` : `<span class="s-str">${esc(raw)}</span>`;
+      i = j; continue;
     }
-
-    // Number
     if (ch === '-' || (ch >= '0' && ch <= '9')) {
       let j = i;
-      while (j < n && '0123456789.-+eE'.includes(str[j])) j++;
-      out += `<span class="s-num">${esc(str.slice(i, j))}</span>`;
-      i = j;
-      continue;
+      while (j < n && /[0-9.\-+eE]/.test(str[j])) j++;
+      out += `<span class="s-num">${esc(str.slice(i,j))}</span>`;
+      i = j; continue;
     }
-
-    // Boolean / null
-    if (str.startsWith('true', i))  { out += `<span class="s-bool">true</span>`;   i += 4; continue; }
-    if (str.startsWith('false', i)) { out += `<span class="s-bool">false</span>`;  i += 5; continue; }
-    if (str.startsWith('null', i))  { out += `<span class="s-null">null</span>`;   i += 4; continue; }
-
-    // Punctuation
-    if ('{}[],:'.includes(ch)) {
-      out += `<span class="s-punc">${esc(ch)}</span>`;
-      i++;
-      continue;
-    }
-
-    // Whitespace / other
-    out += esc(ch);
-    i++;
+    if (str.startsWith('true',  i)) { out += `<span class="s-bool">true</span>`;  i += 4; continue; }
+    if (str.startsWith('false', i)) { out += `<span class="s-bool">false</span>`; i += 5; continue; }
+    if (str.startsWith('null',  i)) { out += `<span class="s-null">null</span>`;  i += 4; continue; }
+    if ('{}[],:'.includes(ch))      { out += `<span class="s-punc">${esc(ch)}</span>`; i++; continue; }
+    out += esc(ch); i++;
   }
-
   return out;
 }
 
 function esc(s) {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 /* ══════════════════════════════════════════════════════
-   MODULE: Search / Filter
-   ══════════════════════════════════════════════════════ */
+   MODULE: Search
+══════════════════════════════════════════════════════ */
 function applySearch(term) {
   state.searchTerm = term.toLowerCase().trim();
   const rows = treeOutput.querySelectorAll('.tree-row');
   let hits = 0;
-
   rows.forEach(row => {
     row.classList.remove('highlighted');
     if (!state.searchTerm) return;
-
-    const keyEls = row.querySelectorAll('.tree-key');
-    const valEls = row.querySelectorAll('.tree-val');
     let match = false;
-
-    keyEls.forEach(el => {
+    row.querySelectorAll('.tree-key, .tree-val').forEach(el => {
       if (el.dataset.raw && el.dataset.raw.toLowerCase().includes(state.searchTerm)) match = true;
     });
-    valEls.forEach(el => {
-      if (el.dataset.raw && el.dataset.raw.toLowerCase().includes(state.searchTerm)) match = true;
-    });
-
     if (match) {
       row.classList.add('highlighted');
       hits++;
-      // Ensure parent nodes are expanded
       let p = row.parentElement;
       while (p) {
         if (p.classList.contains('tree-children') && p.classList.contains('collapsed')) {
           p.classList.remove('collapsed');
-          const btn = p.previousElementSibling?.querySelector('.toggle-btn');
-          if (btn) btn.classList.replace('collapsed', 'expanded');
+          const btn = p.previousElementSibling?.querySelector?.('.toggle-btn');
+          if (btn) btn.classList.replace('collapsed','expanded');
         }
         p = p.parentElement;
       }
     }
   });
-
   matchCount.textContent = state.searchTerm ? `${hits}` : '';
 }
 
 /* ══════════════════════════════════════════════════════
-   MODULE: Core Parse & Render Pipeline
-   ══════════════════════════════════════════════════════ */
+   CORE: Parse & Render Pipeline
+══════════════════════════════════════════════════════ */
 function runParse() {
   const src = inputArea.value;
   hideError();
+  if (!src.trim()) { showEmpty(); return; }
 
-  if (!src.trim()) {
-    showEmpty();
+  const { blocks, warnings } = extractBlocks(src);
+
+  if (blocks.length === 0) {
+    showError('No parseable JSON or XML found.' + (warnings.length ? ' ' + warnings[0] : ''));
     return;
   }
 
-  const fmt = detectFormat(src);
+  state.blocks = blocks;
 
-  if (!fmt) {
-    showError('Could not detect format. Input must start with { / [ (JSON) or < (XML).');
-    return;
-  }
+  // Badge
+  const types = [...new Set(blocks.map(b => b.type))];
+  if (types.length === 1) updateBadge(types[0]);
+  else { formatBadge.textContent = 'JSON+XML'; formatBadge.className = 'format-badge mixed'; }
 
-  try {
-    let parsed;
-    if (fmt === 'json') {
-      parsed = parseJSON(src);
-    } else {
-      const xmlDoc = parseXML(src);
-      parsed = xmlToJson(xmlDoc);
-    }
-    state.parsed = parsed;
-    state.format = fmt;
+  if (warnings.length) showWarning(warnings.join(' · '));
 
-    updateBadge(fmt);
-    renderOutput();
-    if (state.searchTerm) applySearch(state.searchTerm);
-
-  } catch (err) {
-    showError(err.message || String(err));
-  }
+  renderOutput();
+  if (state.searchTerm) applySearch(state.searchTerm);
 }
 
 function renderOutput() {
   emptyState.style.display = 'none';
-
   if (state.view === 'tree') {
     treeOutput.style.display = 'block';
     textOutput.style.display = 'none';
-    renderTree(state.parsed, treeOutput);
-    treeOutput.style.paddingLeft = '12px';
+    renderTree(state.blocks, treeOutput);
   } else {
     treeOutput.style.display = 'none';
     textOutput.style.display = 'block';
-    if (state.minified) {
-      textOutput.innerHTML = esc(JSON.stringify(state.parsed));
-    } else {
-      textOutput.innerHTML = formatOutput(state.parsed, state.format, state.indent);
-    }
-    const total = countNodes(state.parsed);
+    renderTextView(state.blocks);
+    const total = state.blocks.reduce((s, b) => s + countNodes(b.data), 0);
     nodeCount.textContent = `${total.toLocaleString()} node${total !== 1 ? 's' : ''}`;
   }
 }
 
 function countNodes(v) {
   if (v === null || typeof v !== 'object') return 1;
-  return 1 + Object.values(v).reduce((s, c) => s + countNodes(c), 0);
+  return 1 + Object.values(v).reduce((s,c) => s + countNodes(c), 0);
 }
 
-/* ── UI helpers ────────────────────────────────────── */
+/* ── UI helpers ─────────────────────────────────────── */
 function showError(msg) {
+  errorBanner.style.cssText = 'display:block;background:rgba(247,92,92,0.12);border-top:1px solid rgba(247,92,92,0.4);color:var(--red)';
   errorBanner.textContent = '⚠ ' + msg;
-  errorBanner.style.display = 'block';
   inputArea.style.outline = '1px solid var(--red)';
+}
+
+function showWarning(msg) {
+  errorBanner.style.cssText = 'display:block;background:rgba(246,166,35,0.08);border-top:1px solid rgba(246,166,35,0.35);color:var(--amber)';
+  errorBanner.textContent = '⚡ ' + msg;
+  inputArea.style.outline = '1px solid rgba(246,166,35,0.4)';
 }
 
 function hideError() {
@@ -553,211 +617,153 @@ function hideError() {
 }
 
 function showEmpty() {
-  emptyState.style.display = 'flex';
-  treeOutput.style.display = 'none';
-  textOutput.style.display = 'none';
-  formatBadge.textContent = '—';
-  formatBadge.className = 'format-badge';
-  nodeCount.textContent = '';
-  state.parsed = null;
-  state.format = null;
+  emptyState.style.display  = 'flex';
+  treeOutput.style.display  = 'none';
+  textOutput.style.display  = 'none';
+  formatBadge.textContent   = '—';
+  formatBadge.className     = 'format-badge';
+  nodeCount.textContent     = '';
+  state.blocks = [];
 }
 
 function updateBadge(fmt) {
   formatBadge.textContent = fmt.toUpperCase();
-  formatBadge.className = 'format-badge ' + fmt;
+  formatBadge.className   = 'format-badge ' + fmt;
 }
 
 function expandAll() {
-  treeOutput.querySelectorAll('.tree-children').forEach(el => {
-    el.classList.remove('collapsed');
-  });
-  treeOutput.querySelectorAll('.toggle-btn').forEach(btn => {
-    btn.classList.replace('collapsed', 'expanded');
-  });
+  treeOutput.querySelectorAll('.tree-children').forEach(el => el.classList.remove('collapsed'));
+  treeOutput.querySelectorAll('.toggle-btn').forEach(btn => btn.classList.replace('collapsed','expanded'));
 }
 
 function collapseAll() {
-  treeOutput.querySelectorAll('.tree-children').forEach(el => {
-    el.classList.add('collapsed');
-  });
-  treeOutput.querySelectorAll('.toggle-btn').forEach(btn => {
-    btn.classList.replace('expanded', 'collapsed');
-  });
+  treeOutput.querySelectorAll('.tree-children').forEach(el => el.classList.add('collapsed'));
+  treeOutput.querySelectorAll('.toggle-btn').forEach(btn => btn.classList.replace('expanded','collapsed'));
 }
 
 function copyOutput() {
-  const text = state.parsed
-    ? (state.minified
-        ? JSON.stringify(state.parsed)
-        : JSON.stringify(state.parsed, null, state.indent))
-    : '';
-  navigator.clipboard.writeText(text).then(() => {
-    copyToast.classList.add('show');
-    setTimeout(() => copyToast.classList.remove('show'), 1800);
-  }).catch(() => {
-    // fallback
+  const text = state.blocks.map(b =>
+    `// ${b.label}\n` + (state.minified ? JSON.stringify(b.data) : JSON.stringify(b.data, null, state.indent))
+  ).join('\n\n');
+  navigator.clipboard.writeText(text).catch(() => {
     const ta = document.createElement('textarea');
-    ta.value = text;
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand('copy');
-    document.body.removeChild(ta);
-    copyToast.classList.add('show');
-    setTimeout(() => copyToast.classList.remove('show'), 1800);
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); ta.remove();
   });
+  copyToast.classList.add('show');
+  setTimeout(() => copyToast.classList.remove('show'), 1800);
 }
 
 function downloadOutput() {
-  if (!state.parsed) return;
-  const text = state.minified
-    ? JSON.stringify(state.parsed)
-    : JSON.stringify(state.parsed, null, state.indent);
-  const ext = 'json';
+  if (!state.blocks.length) return;
+  const text = state.blocks.map(b =>
+    `// ${b.label}\n` + (state.minified ? JSON.stringify(b.data) : JSON.stringify(b.data, null, state.indent))
+  ).join('\n\n');
   const blob = new Blob([text], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `parsed-output.${ext}`;
-  a.click();
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url; a.download = 'parsed-output.json'; a.click();
   URL.revokeObjectURL(url);
 }
 
 /* ══════════════════════════════════════════════════════
    Event Wiring
-   ══════════════════════════════════════════════════════ */
-
-// Auto-parse on paste
+══════════════════════════════════════════════════════ */
 inputArea.addEventListener('input', () => {
   charCount.textContent = `${inputArea.value.length.toLocaleString()} chars`;
   hideError();
-  // Live badge preview
-  const fmt = detectFormat(inputArea.value);
-  if (fmt) updateBadge(fmt);
-  else { formatBadge.textContent = '—'; formatBadge.className = 'format-badge'; }
 });
 
-// Parse on button click
 parseBtn.addEventListener('click', runParse);
 
-// Keyboard shortcut: Cmd+Enter / Ctrl+Enter
 inputArea.addEventListener('keydown', e => {
-  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-    e.preventDefault();
-    runParse();
-  }
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); runParse(); }
 });
 
-// Clear
 clearBtn.addEventListener('click', () => {
-  inputArea.value = '';
-  charCount.textContent = '0 chars';
-  hideError();
-  showEmpty();
-  searchInput.value = '';
-  matchCount.textContent = '';
+  inputArea.value = ''; charCount.textContent = '0 chars';
+  hideError(); showEmpty(); searchInput.value = ''; matchCount.textContent = '';
 });
 
-// View toggle
 viewTreeBtn.addEventListener('click', () => {
   if (state.view === 'tree') return;
-  state.view = 'tree';
-  viewTreeBtn.classList.add('active');
-  viewTextBtn.classList.remove('active');
-  if (state.parsed) renderOutput();
+  state.view = 'tree'; viewTreeBtn.classList.add('active'); viewTextBtn.classList.remove('active');
+  if (state.blocks.length) renderOutput();
 });
 
 viewTextBtn.addEventListener('click', () => {
   if (state.view === 'text') return;
-  state.view = 'text';
-  viewTextBtn.classList.add('active');
-  viewTreeBtn.classList.remove('active');
-  if (state.parsed) renderOutput();
+  state.view = 'text'; viewTextBtn.classList.add('active'); viewTreeBtn.classList.remove('active');
+  if (state.blocks.length) renderOutput();
 });
 
-// Indent toggle
 [indent2Btn, indent4Btn].forEach(btn => {
   btn.addEventListener('click', () => {
-    indent2Btn.classList.remove('active');
-    indent4Btn.classList.remove('active');
-    btn.classList.add('active');
-    state.indent = parseInt(btn.dataset.indent, 10);
-    if (state.parsed && state.view === 'text') renderOutput();
+    indent2Btn.classList.remove('active'); indent4Btn.classList.remove('active');
+    btn.classList.add('active'); state.indent = parseInt(btn.dataset.indent, 10);
+    if (state.blocks.length && state.view === 'text') renderOutput();
   });
 });
 
-// Minify toggle
 toggleMinify.addEventListener('click', () => {
   state.minified = !state.minified;
   toggleMinify.textContent = state.minified ? 'Beautify' : 'Minify';
   toggleMinify.classList.toggle('active', state.minified);
-  if (state.parsed) renderOutput();
+  if (state.blocks.length) renderOutput();
 });
 
-// Expand / Collapse All
 expandAllBtn.addEventListener('click',   expandAll);
 collapseAllBtn.addEventListener('click', collapseAll);
+copyBtn.addEventListener('click',        copyOutput);
+downloadBtn.addEventListener('click',    downloadOutput);
 
-// Copy
-copyBtn.addEventListener('click', copyOutput);
-
-// Download
-downloadBtn.addEventListener('click', downloadOutput);
-
-// Search — debounced
 let searchTimer;
 searchInput.addEventListener('input', () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
-    if (state.view === 'tree' && state.parsed) {
-      applySearch(searchInput.value);
-    }
+    if (state.view === 'tree' && state.blocks.length) applySearch(searchInput.value);
   }, 200);
 });
 
 /* ══════════════════════════════════════════════════════
-   Demo seed on load
-   ══════════════════════════════════════════════════════ */
-const DEMO_JSON = `{
+   Demo seed — mixed JSON + XML in one paste
+══════════════════════════════════════════════════════ */
+const DEMO = `Here is some store data:
+
+{
   "store": {
     "name": "DataLens Books",
     "open": true,
     "rating": 4.9,
-    "address": {
-      "street": "42 Parser Lane",
-      "city": "Syntatown",
-      "zip": "10101"
-    },
-    "genres": ["Fiction", "Science", "Technology", "Art"],
+    "genres": ["Fiction", "Science", "Technology"],
     "books": [
-      {
-        "id": 1,
-        "title": "The JSON Chronicles",
-        "author": "Ada Syntax",
-        "price": 19.99,
-        "inStock": true,
-        "tags": ["bestseller", "coding"]
-      },
-      {
-        "id": 2,
-        "title": "XML: The Forgotten Tome",
-        "author": "Tim Markup",
-        "price": 14.50,
-        "inStock": false,
-        "tags": ["classic", "web"]
-      },
-      {
-        "id": 3,
-        "title": "Parsing at the Edge",
-        "author": "null",
-        "price": null,
-        "inStock": true,
-        "tags": []
-      }
+      { "id": 1, "title": "The JSON Chronicles", "price": 19.99, "inStock": true },
+      { "id": 2, "title": "XML: The Forgotten Tome", "price": 14.50, "inStock": false }
     ]
   }
-}`;
+}
 
-inputArea.value = DEMO_JSON;
-charCount.textContent = `${DEMO_JSON.length.toLocaleString()} chars`;
+And here is the catalogue in XML:
+
+<catalogue version="2025">
+  <section name="Featured">
+    <book id="101" featured="true">
+      <title>Parsing at the Edge</title>
+      <author>Ada Syntax</author>
+      <price currency="USD">24.99</price>
+      <tags>
+        <tag>algorithms</tag>
+        <tag>compilers</tag>
+      </tags>
+    </book>
+    <book id="102">
+      <title>The Recursive Mind</title>
+      <author>Tim Markup</author>
+      <price currency="EUR">18.00</price>
+    </book>
+  </section>
+</catalogue>`;
+
+inputArea.value = DEMO;
+charCount.textContent = `${DEMO.length.toLocaleString()} chars`;
 runParse();
