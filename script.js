@@ -520,35 +520,164 @@ function esc(s) {
 }
 
 /* ══════════════════════════════════════════════════════
-   MODULE: Search
+   MODULE: Search  (inline highlights + prev/next + scroll)
 ══════════════════════════════════════════════════════ */
+const search = {
+  hits:   [],   // matched .tree-row elements in DOM order
+  cursor: -1,
+};
+
+/* Wrap every occurrence of `term` inside el's text with <mark class="sh"> */
+function injectHighlight(el, term) {
+  const raw = el.dataset.raw;
+  if (!raw) return false;
+  const lo = raw.toLowerCase();
+  if (!lo.includes(term)) return false;
+
+  // Build display text the same way formatPrimitive / buildNode would
+  const display = el.classList.contains('tree-val')
+    ? el.textContent          // already formatted (quoted string / number etc.)
+    : el.textContent;         // key label as shown
+
+  // Find and wrap all case-insensitive matches in the display text
+  // We match against the lowercased display text
+  const loDisplay = display.toLowerCase();
+  let result = '', last = 0, i;
+  let idx = loDisplay.indexOf(term, 0);
+  while (idx !== -1) {
+    result += escHtml(display.slice(last, idx));
+    result += `<mark class="sh">${escHtml(display.slice(idx, idx + term.length))}</mark>`;
+    last = idx + term.length;
+    idx  = loDisplay.indexOf(term, last);
+  }
+  result += escHtml(display.slice(last));
+  el.innerHTML = result;
+  return true;
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+/* Restore plain text from dataset.raw */
+function clearHighlight(el) {
+  if (!el.dataset.raw) return;
+  // Re-derive display text
+  if (el.classList.contains('tree-val')) {
+    el.textContent = el.textContent; // already plain after innerHTML reset
+    // Reconstruct from raw
+    const raw = el.dataset.raw;
+    if (el.classList.contains('v-str')) {
+      el.textContent = raw.length > 120 ? `"${raw.slice(0,120)}…"` : `"${raw}"`;
+    } else {
+      el.textContent = raw;
+    }
+  } else {
+    // key — textContent was set during buildNode; restore from the mark-stripped version
+    el.textContent = el.textContent; // marks are inline so strip via textContent read
+    // Actually innerHTML = textContent after a marks-only change is fine, but
+    // just set textContent from the current (marks stripped) textContent:
+    el.textContent = el.innerText || el.textContent;
+  }
+}
+
+function clearAllHighlights() {
+  treeOutput.querySelectorAll('.tree-row').forEach(row => {
+    row.classList.remove('highlighted', 'search-active');
+    row.querySelectorAll('.tree-key, .tree-val').forEach(el => {
+      // Strip any <mark> tags by restoring from dataset.raw
+      if (!el.dataset.raw) return;
+      const raw = el.dataset.raw;
+      if (el.classList.contains('v-str')) {
+        el.textContent = raw.length > 120 ? `"${raw.slice(0,120)}…"` : `"${raw}"`;
+      } else if (el.classList.contains('tree-key')) {
+        // Restore key label
+        const kt = el.dataset.keytype || '';
+        if (el.classList.contains('attr-key') && raw !== '@attributes') el.textContent = `@${raw}`;
+        else if (el.classList.contains('text-key'))  el.textContent = '#text';
+        else if (el.classList.contains('index-key')) el.textContent = `[${raw}]`;
+        else el.textContent = raw;
+      } else {
+        el.textContent = raw;
+      }
+    });
+  });
+}
+
 function applySearch(term) {
   state.searchTerm = term.toLowerCase().trim();
-  const rows = treeOutput.querySelectorAll('.tree-row');
-  let hits = 0;
-  rows.forEach(row => {
-    row.classList.remove('highlighted');
-    if (!state.searchTerm) return;
-    let match = false;
+
+  // Always clear previous highlights first
+  clearAllHighlights();
+  search.hits   = [];
+  search.cursor = -1;
+
+  const searchNav = $('searchNav');
+
+  if (!state.searchTerm) {
+    matchCount.textContent  = '';
+    searchNav.style.display = 'none';
+    return;
+  }
+
+  // Scan every row, inject highlights, collect hits
+  treeOutput.querySelectorAll('.tree-row').forEach(row => {
+    let matched = false;
     row.querySelectorAll('.tree-key, .tree-val').forEach(el => {
-      if (el.dataset.raw && el.dataset.raw.toLowerCase().includes(state.searchTerm)) match = true;
+      if (injectHighlight(el, state.searchTerm)) matched = true;
     });
-    if (match) {
-      row.classList.add('highlighted');
-      hits++;
-      let p = row.parentElement;
-      while (p) {
-        if (p.classList.contains('tree-children') && p.classList.contains('collapsed')) {
-          p.classList.remove('collapsed');
-          const btn = p.previousElementSibling?.querySelector?.('.toggle-btn');
-          if (btn) btn.classList.replace('collapsed','expanded');
-        }
-        p = p.parentElement;
+    if (!matched) return;
+
+    // Expand collapsed ancestors
+    let p = row.parentElement;
+    while (p) {
+      if (p.classList.contains('tree-children') && p.classList.contains('collapsed')) {
+        p.classList.remove('collapsed');
+        const btn = p.previousElementSibling?.querySelector?.('.toggle-btn');
+        if (btn) btn.classList.replace('collapsed', 'expanded');
       }
+      p = p.parentElement;
     }
+
+    row.classList.add('highlighted');
+    search.hits.push(row);
   });
-  matchCount.textContent = state.searchTerm ? `${hits}` : '';
+
+  const total = search.hits.length;
+  searchNav.style.display = total > 0 ? 'flex' : 'none';
+
+  if (total > 0) {
+    navigateSearch(0);
+  } else {
+    matchCount.textContent = '0 results';
+  }
 }
+
+function navigateSearch(idx) {
+  if (!search.hits.length) return;
+  idx = ((idx % search.hits.length) + search.hits.length) % search.hits.length;
+
+  // De-activate previous
+  if (search.cursor >= 0 && search.hits[search.cursor]) {
+    search.hits[search.cursor].classList.remove('search-active');
+  }
+
+  search.cursor = idx;
+  const activeRow = search.hits[idx];
+  activeRow.classList.add('search-active');
+
+  // Scroll: use getBoundingClientRect relative to outputWrap
+  const wrap = document.getElementById('outputWrap');
+  const rowRect  = activeRow.getBoundingClientRect();
+  const wrapRect = wrap.getBoundingClientRect();
+  const offset   = rowRect.top - wrapRect.top - (wrap.clientHeight / 2) + (rowRect.height / 2);
+  wrap.scrollBy({ top: offset, behavior: 'smooth' });
+
+  matchCount.textContent = `${idx + 1} / ${search.hits.length}`;
+}
+
+function searchNext() { navigateSearch(search.cursor + 1); }
+function searchPrev() { navigateSearch(search.cursor - 1); }
 
 /* ══════════════════════════════════════════════════════
    CORE: Parse & Render Pipeline
@@ -580,6 +709,10 @@ function runParse() {
 
 function renderOutput() {
   emptyState.style.display = 'none';
+  // Reset search state on every render
+  search.hits = []; search.cursor = -1;
+  $('searchNav').style.display = 'none';
+  matchCount.textContent = '';
   if (state.view === 'tree') {
     treeOutput.style.display = 'block';
     textOutput.style.display = 'none';
@@ -717,12 +850,55 @@ collapseAllBtn.addEventListener('click', collapseAll);
 copyBtn.addEventListener('click',        copyOutput);
 downloadBtn.addEventListener('click',    downloadOutput);
 
+// Search — input triggers fresh search
 let searchTimer;
 searchInput.addEventListener('input', () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
     if (state.view === 'tree' && state.blocks.length) applySearch(searchInput.value);
-  }, 200);
+  }, 180);
+});
+
+// Search — Enter/Shift+Enter to cycle matches
+searchInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    if (e.shiftKey) searchPrev(); else searchNext();
+  }
+  if (e.key === 'Escape') {
+    searchInput.value = '';
+    applySearch('');
+  }
+});
+
+$('searchNextBtn').addEventListener('click', searchNext);
+$('searchPrevBtn').addEventListener('click', searchPrev);
+
+// Fullscreen output panel
+const outputPanel   = document.querySelector('.panel-output');
+const fsIconExpand  = $('fsIconExpand');
+const fsIconCollapse= $('fsIconCollapse');
+let   isFullscreen  = false;
+
+function toggleFullscreen() {
+  isFullscreen = !isFullscreen;
+  outputPanel.classList.toggle('panel-fullscreen', isFullscreen);
+  document.querySelector('.panel-input').classList.toggle('panel-hidden', isFullscreen);
+  document.querySelector('.divider').classList.toggle('panel-hidden', isFullscreen);
+  fsIconExpand.style.display   = isFullscreen ? 'none'  : '';
+  fsIconCollapse.style.display = isFullscreen ? ''      : 'none';
+}
+
+$('fullscreenBtn').addEventListener('click', toggleFullscreen);
+
+// Keyboard shortcut: F to toggle fullscreen (when not typing in textarea/input)
+document.addEventListener('keydown', e => {
+  if (e.key === 'f' || e.key === 'F') {
+    const tag = document.activeElement?.tagName;
+    if (tag === 'TEXTAREA' || tag === 'INPUT') return;
+    toggleFullscreen();
+  }
+  if (e.key === 'Escape' && isFullscreen) toggleFullscreen();
 });
 
 /* ══════════════════════════════════════════════════════

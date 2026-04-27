@@ -78,6 +78,14 @@
             <svg class="search-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="6.5" cy="6.5" r="4"/><path d="M10.5 10.5L14 14"/></svg>
             <input type="text" id="searchInput" placeholder="Search keys / values…" />
             <span class="match-count" id="matchCount"></span>
+            <div class="search-nav" id="searchNav" style="display:none">
+              <button class="search-nav-btn" id="searchPrevBtn" title="Previous match (Shift+Enter)">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 12L6 8l4-4"/></svg>
+              </button>
+              <button class="search-nav-btn" id="searchNextBtn" title="Next match (Enter)">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 4l4 4-4 4"/></svg>
+              </button>
+            </div>
           </div>
           <button class="icon-btn" id="expandAllBtn" title="Expand all">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 6l5 5 5-5"/><path d="M3 2h10"/><path d="M3 14h10"/></svg>
@@ -90,6 +98,10 @@
           </button>
           <button class="icon-btn" id="downloadBtn" title="Download">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 2v8M5 7l3 3 3-3"/><path d="M2 13h12"/></svg>
+          </button>
+          <button class="icon-btn" id="fullscreenBtn" title="Fullscreen output (F)">
+            <svg id="fsIconExpand" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"/></svg>
+            <svg id="fsIconCollapse" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" style="display:none"><path d="M6 2v4H2M10 6V2h4M10 14v-4h4M6 10v4H2"/></svg>
           </button>
         </div>
       </div>
