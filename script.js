@@ -41,51 +41,64 @@ const toggleMinify   = $('toggleMinify');
 /* ══════════════════════════════════════════════════════
    MODULE: Resilient Multi-Block Extractor
    Scans the raw input string and pulls out every
-   JSON object/array and XML document it can find,
-   regardless of surrounding noise / extra text.
-   Returns: { blocks: [{type, label, data}], warnings: [str] }
+   JSON object/array and XML document it can find.
+   Any plain text sitting before a block is preserved
+   as block.caption so nothing is ever discarded.
+   Returns: { blocks: [{type, label, caption, data}], warnings: [str] }
 ══════════════════════════════════════════════════════ */
 function extractBlocks(src) {
   const blocks   = [];
   const warnings = [];
   let   pos      = 0;
   let   blockIdx = 0;
+  let   pendingCaption = ''; // plain text accumulated since last block
+
+  /* Collect text between pos and nextPos, append to pendingCaption */
+  function collectText(from, to) {
+    const chunk = src.slice(from, to);
+    if (chunk.trim()) pendingCaption += (pendingCaption ? '\n' : '') + chunk.trim();
+  }
+
+  function flushBlock(blockObj) {
+    blockObj.caption = pendingCaption || '';
+    pendingCaption   = '';
+    blocks.push(blockObj);
+  }
 
   while (pos < src.length) {
-    // Skip whitespace
-    while (pos < src.length && /\s/.test(src[pos])) pos++;
-    if (pos >= src.length) break;
-
     const ch = src[pos];
+
+    /* ── Whitespace-only — skip but DON'T wipe pendingCaption ── */
+    if (/\s/.test(ch)) { pos++; continue; }
 
     /* ── JSON object or array ──────────────────────── */
     if (ch === '{' || ch === '[') {
       const pair = ch === '{' ? ['{','}'] : ['[',']'];
-      const { text: rawText, end, error } = extractBalanced(src, pos, pair);
+      const { end, error } = extractBalanced(src, pos, pair);
       const rawSlice = src.slice(pos, end);
 
+      blockIdx++;
       if (error) {
         const partial = tryRepairJSON(rawSlice);
         if (partial !== null) {
-          blockIdx++;
-          blocks.push({ type:'json', label:`JSON #${blockIdx} (repaired)`, data: partial });
+          flushBlock({ type:'json', label:`JSON #${blockIdx} (repaired)`, data: partial });
           warnings.push(`JSON block at pos ${pos} was incomplete — partially recovered.`);
         } else {
           warnings.push(`Unparseable JSON block at pos ${pos} — skipped.`);
+          blockIdx--;
         }
       } else {
         try {
           const parsed = JSON.parse(rawSlice);
-          blockIdx++;
-          blocks.push({ type:'json', label:`JSON #${blockIdx}`, data: parsed });
+          flushBlock({ type:'json', label:`JSON #${blockIdx}`, data: parsed });
         } catch {
           const repaired = tryRepairJSON(rawSlice);
           if (repaired !== null) {
-            blockIdx++;
-            blocks.push({ type:'json', label:`JSON #${blockIdx} (repaired)`, data: repaired });
+            flushBlock({ type:'json', label:`JSON #${blockIdx} (repaired)`, data: repaired });
             warnings.push(`JSON block at pos ${pos} had minor issues and was auto-repaired.`);
           } else {
             warnings.push(`Invalid JSON at pos ${pos} — skipped.`);
+            blockIdx--;
           }
         }
       }
@@ -93,15 +106,21 @@ function extractBlocks(src) {
       continue;
     }
 
-    /* ── XML processing instruction / comment — skip ─ */
+    /* ── XML processing instruction <?…?> — treat as caption text ── */
     if (src.startsWith('<?', pos)) {
       const ci = src.indexOf('?>', pos + 2);
-      pos = ci === -1 ? src.length : ci + 2;
+      const end = ci === -1 ? src.length : ci + 2;
+      collectText(pos, end);
+      pos = end;
       continue;
     }
+
+    /* ── XML comment <!--…--> — treat as caption text ── */
     if (src.startsWith('<!--', pos)) {
       const ci = src.indexOf('-->', pos + 4);
-      pos = ci === -1 ? src.length : ci + 3;
+      const end = ci === -1 ? src.length : ci + 3;
+      collectText(pos, end);
+      pos = end;
       continue;
     }
 
@@ -109,11 +128,13 @@ function extractBlocks(src) {
     if (ch === '<') {
       const xmlChunk = extractXMLChunk(src, pos);
       if (xmlChunk === null) {
-        warnings.push(`Unexpected '<' at pos ${pos} — not a valid XML tag, skipped.`);
+        // Not a valid tag opener — treat this char as plain text
+        pendingCaption += src[pos];
         pos++;
         continue;
       }
 
+      blockIdx++;
       try {
         const parser = new DOMParser();
         const doc    = parser.parseFromString(xmlChunk.text, 'text/xml');
@@ -121,28 +142,38 @@ function extractBlocks(src) {
         if (errEl) {
           const partial = tryRepairXML(xmlChunk.text);
           if (partial) {
-            blockIdx++;
-            blocks.push({ type:'xml', label:`XML #${blockIdx} (repaired)`, data: partial });
+            flushBlock({ type:'xml', label:`XML #${blockIdx} (repaired)`, data: partial });
             warnings.push(`XML block at pos ${pos} had errors — partially recovered.`);
           } else {
             warnings.push(`Invalid XML at pos ${pos}: ${errEl.textContent.split('\n')[0]} — skipped.`);
+            blockIdx--;
           }
         } else {
-          const converted = xmlToJson(doc);
-          blockIdx++;
-          blocks.push({ type:'xml', label:`XML #${blockIdx}`, data: converted });
+          flushBlock({ type:'xml', label:`XML #${blockIdx}`, data: xmlToJson(doc) });
         }
       } catch (e) {
         warnings.push(`XML parse exception at pos ${pos}: ${e.message} — skipped.`);
+        blockIdx--;
       }
       pos = xmlChunk.end;
       continue;
     }
 
-    /* ── Non-data characters — skip to next starter ── */
-    const next = findNextStarter(src, pos + 1);
-    if (next === -1) break;
-    pos = next;
+    /* ── Anything else (plain text, prose, comments, etc.) ── */
+    // Scan forward to next block-starter, collecting everything as plain text
+    const nextStart = findNextStarter(src, pos + 1);
+    if (nextStart === -1) {
+      // No more blocks ahead — rest is trailing text
+      collectText(pos, src.length);
+      break;
+    }
+    collectText(pos, nextStart);
+    pos = nextStart;
+  }
+
+  // Any remaining caption with no following block becomes a text-only block
+  if (pendingCaption.trim()) {
+    blocks.push({ type: 'text', label: 'Text', caption: pendingCaption, data: null });
   }
 
   return { blocks, warnings };
@@ -290,6 +321,25 @@ function renderTree(blocks, container) {
   container.innerHTML = '';
 
   blocks.forEach((block, bi) => {
+    // Caption (prose text before this block)
+    if (block.caption) {
+      const cap = document.createElement('div');
+      cap.className = 'block-caption';
+      cap.textContent = block.caption;
+      container.appendChild(cap);
+    }
+
+    // Text-only block (no JSON/XML data)
+    if (block.type === 'text') {
+      if (bi < blocks.length - 1) {
+        const sep = document.createElement('div');
+        sep.className = 'block-separator';
+        container.appendChild(sep);
+      }
+      return;
+    }
+
+    // Block type header
     const header  = document.createElement('div');
     header.className = 'block-header';
     const typeTag = document.createElement('span');
@@ -474,12 +524,18 @@ function formatPrimitive(value) {
    MODULE: Text View + Syntax Highlighting
 ══════════════════════════════════════════════════════ */
 function renderTextView(blocks) {
-  textOutput.innerHTML = blocks.map(b =>
-    `<span class="block-hdr-text ${b.type}">${esc(b.label)}</span>\n` +
-    (state.minified
+  textOutput.innerHTML = blocks.map(b => {
+    const capHtml = b.caption
+      ? `<span class="block-caption-text">${esc(b.caption)}</span>\n`
+      : '';
+    if (b.type === 'text') return capHtml.trimEnd();
+    const bodyHtml = state.minified
       ? esc(JSON.stringify(b.data))
-      : syntaxHighlightJSON(JSON.stringify(b.data, null, state.indent)))
-  ).join('\n\n');
+      : syntaxHighlightJSON(JSON.stringify(b.data, null, state.indent));
+    return capHtml +
+      `<span class="block-hdr-text ${b.type}">${esc(b.label)}</span>\n` +
+      bodyHtml;
+  }).join('\n\n');
 }
 
 function syntaxHighlightJSON(str) {
@@ -697,7 +753,7 @@ function runParse() {
   state.blocks = blocks;
 
   // Badge
-  const types = [...new Set(blocks.map(b => b.type))];
+  const types = [...new Set(blocks.filter(b => b.type !== 'text').map(b => b.type))];
   if (types.length === 1) updateBadge(types[0]);
   else { formatBadge.textContent = 'JSON+XML'; formatBadge.className = 'format-badge mixed'; }
 
@@ -721,7 +777,7 @@ function renderOutput() {
     treeOutput.style.display = 'none';
     textOutput.style.display = 'block';
     renderTextView(state.blocks);
-    const total = state.blocks.reduce((s, b) => s + countNodes(b.data), 0);
+    const total = state.blocks.reduce((s, b) => s + (b.data ? countNodes(b.data) : 0), 0);
     nodeCount.textContent = `${total.toLocaleString()} node${total !== 1 ? 's' : ''}`;
   }
 }
@@ -904,7 +960,8 @@ document.addEventListener('keydown', e => {
 /* ══════════════════════════════════════════════════════
    Demo seed — mixed JSON + XML in one paste
 ══════════════════════════════════════════════════════ */
-const DEMO = `Here is some store data:
+const DEMO = `Store inventory data exported on 2025-01-15.
+Source: internal ERP system. Do not distribute.
 
 {
   "store": {
@@ -919,7 +976,8 @@ const DEMO = `Here is some store data:
   }
 }
 
-And here is the catalogue in XML:
+The following XML contains the same catalogue in a legacy format.
+Exported from warehouse system v3.2.
 
 <catalogue version="2025">
   <section name="Featured">
