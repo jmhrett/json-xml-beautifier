@@ -77,6 +77,14 @@ function extractBlocks(src) {
       const { end, error } = extractBalanced(src, pos, pair);
       const rawSlice = src.slice(pos, end);
 
+      // Gate: only treat as JSON if it genuinely looks like structured data.
+      // Bare { or [ in prose (CSS, templates, math) silently become plain text.
+      if (!looksLikeJSON(rawSlice, ch)) {
+        pendingCaption += rawSlice;
+        pos = end;
+        continue;
+      }
+
       blockIdx++;
       if (error) {
         const partial = tryRepairJSON(rawSlice);
@@ -84,7 +92,8 @@ function extractBlocks(src) {
           flushBlock({ type:'json', label:`JSON #${blockIdx} (repaired)`, data: partial });
           warnings.push(`JSON block at pos ${pos} was incomplete — partially recovered.`);
         } else {
-          warnings.push(`Unparseable JSON block at pos ${pos} — skipped.`);
+          // Not recoverable — fold back into plain text, no warning spam
+          pendingCaption += rawSlice;
           blockIdx--;
         }
       } else {
@@ -97,7 +106,8 @@ function extractBlocks(src) {
             flushBlock({ type:'json', label:`JSON #${blockIdx} (repaired)`, data: repaired });
             warnings.push(`JSON block at pos ${pos} had minor issues and was auto-repaired.`);
           } else {
-            warnings.push(`Invalid JSON at pos ${pos} — skipped.`);
+            // Not valid JSON — silently fold back into plain text, no error
+            pendingCaption += rawSlice;
             blockIdx--;
           }
         }
@@ -145,14 +155,16 @@ function extractBlocks(src) {
             flushBlock({ type:'xml', label:`XML #${blockIdx} (repaired)`, data: partial });
             warnings.push(`XML block at pos ${pos} had errors — partially recovered.`);
           } else {
-            warnings.push(`Invalid XML at pos ${pos}: ${errEl.textContent.split('\n')[0]} — skipped.`);
+            // Not valid XML — fold back as plain text, no warning spam
+            pendingCaption += xmlChunk.text;
             blockIdx--;
           }
         } else {
           flushBlock({ type:'xml', label:`XML #${blockIdx}`, data: xmlToJson(doc) });
         }
       } catch (e) {
-        warnings.push(`XML parse exception at pos ${pos}: ${e.message} — skipped.`);
+        // Exception — fold back as plain text silently
+        pendingCaption += xmlChunk.text;
         blockIdx--;
       }
       pos = xmlChunk.end;
@@ -243,6 +255,39 @@ function extractXMLChunk(src, pos) {
 }
 
 function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+/* ── Gate: does this slice look like real JSON data? ───
+   Heuristics to avoid treating prose { } or [ ] as JSON:
+   - Objects must contain at least one "key": pattern
+   - Arrays must contain a value (string/num/bool/obj/arr)
+   - Very short balanced brackets with no structure = plain text
+──────────────────────────────────────────────────────── */
+function looksLikeJSON(raw, opener) {
+  const s = raw.trim();
+  if (s.length < 2) return false;
+
+  if (opener === '{') {
+    // Must have at least one "key": pair (quoted key followed by colon)
+    return /"[^"\\]*"\s*:/.test(s);
+  }
+
+  if (opener === '[') {
+    const inner = s.slice(1, s.length - 1).trim();
+    if (!inner) return true; // empty array [] is valid JSON
+    // Must contain a recognisable JSON value as first token
+    return (
+      inner[0] === '"'  ||   // string
+      inner[0] === '{'  ||   // object
+      inner[0] === '['  ||   // nested array
+      /^-?[0-9]/.test(inner) || // number
+      inner.startsWith('true') ||
+      inner.startsWith('false') ||
+      inner.startsWith('null')
+    );
+  }
+
+  return false;
+}
 
 /* ── JSON repair: trailing commas, single quotes ────── */
 function tryRepairJSON(str) {
