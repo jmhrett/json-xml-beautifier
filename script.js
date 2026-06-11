@@ -562,7 +562,7 @@ function formatPrimitive(value) {
   if (t === 'boolean') return { cls:'v-bool', display: String(value) };
   if (t === 'number')  return { cls:'v-num',  display: String(value) };
   const s = String(value);
-  return { cls:'v-str', display: s.length > 120 ? `"${s.slice(0,120)}…"` : `"${s}"` };
+  return { cls:'v-str', display: `"${s}"` };
 }
 
 /* ══════════════════════════════════════════════════════
@@ -669,7 +669,7 @@ function clearHighlight(el) {
     // Reconstruct from raw
     const raw = el.dataset.raw;
     if (el.classList.contains('v-str')) {
-      el.textContent = raw.length > 120 ? `"${raw.slice(0,120)}…"` : `"${raw}"`;
+      el.textContent = `"${raw}"`;
     } else {
       el.textContent = raw;
     }
@@ -690,7 +690,7 @@ function clearAllHighlights() {
       if (!el.dataset.raw) return;
       const raw = el.dataset.raw;
       if (el.classList.contains('v-str')) {
-        el.textContent = raw.length > 120 ? `"${raw.slice(0,120)}…"` : `"${raw}"`;
+        el.textContent = `"${raw}"`;
       } else if (el.classList.contains('tree-key')) {
         // Restore key label
         const kt = el.dataset.keytype || '';
@@ -1046,3 +1046,367 @@ Exported from warehouse system v3.2.
 inputArea.value = DEMO;
 charCount.textContent = `${DEMO.length.toLocaleString()} chars`;
 runParse();
+
+/* ══════════════════════════════════════════════════════
+   COMPARE MODE
+══════════════════════════════════════════════════════ */
+
+/* ── Mode toggle ───────────────────────────────────── */
+let currentMode = 'single';
+
+$('modeSingle').addEventListener('click', () => {
+  if (currentMode === 'single') return;
+  currentMode = 'single';
+  $('modeSingle').classList.add('active');
+  $('modeCompare').classList.remove('active');
+  $('singleMode').style.display  = 'flex';
+  $('compareMode').style.display = 'none';
+});
+
+$('modeCompare').addEventListener('click', () => {
+  if (currentMode === 'compare') return;
+  currentMode = 'compare';
+  $('modeCompare').classList.add('active');
+  $('modeSingle').classList.remove('active');
+  $('singleMode').style.display  = 'none';
+  $('compareMode').style.display = 'flex';
+});
+
+/* ── Slot state ─────────────────────────────────────── */
+const slots = {
+  A: { blocks: [], flat: {} },
+  B: { blocks: [], flat: {} },
+};
+
+/* ── Flatten parsed data to dot-path map ────────────── */
+function flattenPaths(obj, prefix, out) {
+  if (obj === null || obj === undefined) {
+    out[prefix] = { val: obj, type: 'null' }; return;
+  }
+  if (typeof obj !== 'object') {
+    out[prefix] = { val: obj, type: typeof obj }; return;
+  }
+  const keys = Object.keys(obj);
+  if (!keys.length) {
+    out[prefix] = { val: Array.isArray(obj) ? '[]' : '{}', type: Array.isArray(obj) ? 'array' : 'object' };
+    return;
+  }
+  for (const k of keys) {
+    flattenPaths(obj[k], prefix ? `${prefix}.${k}` : k, out);
+  }
+}
+
+function blocksToFlat(blocks) {
+  const out = {};
+  if (!blocks.length) return out;
+  if (blocks.length === 1 && blocks[0].data) {
+    flattenPaths(blocks[0].data, '', out);
+  } else {
+    blocks.filter(b => b.data).forEach(b => flattenPaths(b.data, b.label, out));
+  }
+  return out;
+}
+
+/* ── Parse a slot ───────────────────────────────────── */
+function parseSlot(id) {
+  const inp    = $(`inputArea${id}`);
+  const errEl  = $(`errorBanner${id}`);
+  const badge  = $(`formatBadge${id}`);
+  const ncEl   = $(`nodeCount${id}`);
+
+  // In-page tree targets (compare mode layout)
+  const treeEl  = $(`treeOutput${id}`);
+  const emptyEl = $(`emptyState${id}`);
+
+  errEl.style.display = 'none';
+  inp.style.outline   = '';
+
+  const src = inp.value.trim();
+
+  if (!src) {
+    emptyEl.style.display = 'flex';
+    treeEl.style.display  = 'none';
+    badge.textContent = '—'; badge.className = 'format-badge';
+    slots[id].blocks = []; slots[id].flat = {};
+    return;
+  }
+
+  const { blocks, warnings } = extractBlocks(src);
+
+  if (!blocks.length) {
+    errEl.style.cssText = 'display:block;background:rgba(247,92,92,0.12);border-top:1px solid rgba(247,92,92,0.4);color:var(--red)';
+    errEl.textContent = '⚠ No parseable JSON or XML found.';
+    inp.style.outline = '1px solid var(--red)';
+    return;
+  }
+
+  slots[id].blocks = blocks;
+  slots[id].flat   = blocksToFlat(blocks);
+
+  const types = [...new Set(blocks.filter(b => b.type !== 'text').map(b => b.type))];
+  badge.textContent = types.length === 0 ? '—' : types.length === 1 ? types[0].toUpperCase() : 'JSON+XML';
+  badge.className   = 'format-badge' + (types.length === 1 ? ' ' + types[0] : types.length > 1 ? ' mixed' : '');
+
+  if (warnings.length) {
+    errEl.style.cssText = 'display:block;background:rgba(246,166,35,0.08);border-top:1px solid rgba(246,166,35,0.35);color:var(--amber)';
+    errEl.textContent = '⚡ ' + warnings.join(' · ');
+  }
+
+  emptyEl.style.display = 'none';
+  treeEl.style.display  = 'block';
+  treeEl.style.paddingLeft = '12px';
+
+  totalNodes = 0;
+  renderTree(blocks, treeEl);
+  ncEl.textContent = `${totalNodes.toLocaleString()} nodes`;
+}
+
+$('parseBtnA').addEventListener('click', () => parseSlot('A'));
+$('parseBtnB').addEventListener('click', () => parseSlot('B'));
+
+$('inputAreaA').addEventListener('input', () => {
+  $('charCountA').textContent = `${$('inputAreaA').value.length.toLocaleString()} chars`;
+});
+$('inputAreaB').addEventListener('input', () => {
+  $('charCountB').textContent = `${$('inputAreaB').value.length.toLocaleString()} chars`;
+});
+
+function clearSlot(id) {
+  $(`inputArea${id}`).value = '';
+  $(`charCount${id}`).textContent = '0 chars';
+  $(`errorBanner${id}`).style.display = 'none';
+  $(`inputArea${id}`).style.outline = '';
+  $(`emptyState${id}`).style.display = 'flex';
+  $(`treeOutput${id}`).style.display = 'none';
+  $(`treeOutput${id}`).innerHTML = '';
+  slots[id].blocks = []; slots[id].flat = {};
+  $(`formatBadge${id}`).textContent = '—';
+  $(`formatBadge${id}`).className = 'format-badge';
+  $(`nodeCount${id}`).textContent = '';
+}
+
+$('clearBtnA').addEventListener('click', () => clearSlot('A'));
+$('clearBtnB').addEventListener('click', () => clearSlot('B'));
+
+/* ══════════════════════════════════════════════════════
+   DIFF ENGINE
+══════════════════════════════════════════════════════ */
+
+function clearDiffHighlights(container) {
+  container.querySelectorAll('.tree-row').forEach(r => {
+    r.classList.remove('dh-added','dh-removed','dh-changed','dh-type');
+    r.querySelector('.diff-gutter-mark')?.remove();
+    r.querySelector('.diff-old-val')?.remove();
+    r.querySelector('.diff-new-val')?.classList.remove('diff-new-val');
+  });
+}
+
+/* Build dotPath → first matching row element */
+function buildRowPathMap(container) {
+  const map = {};
+  container.querySelectorAll('.tree-row').forEach(row => {
+    const path = rowToDotPath(row, container);
+    if (path !== null && !map[path]) map[path] = row;
+  });
+  return map;
+}
+
+function rowToDotPath(startRow, container) {
+  const parts = [];
+  // Walk up the DOM collecting key labels from ancestor tree-rows
+  let el = startRow;
+  while (el && el !== container) {
+    if (el.classList && el.classList.contains('tree-row')) {
+      const keyEl = el.querySelector(':scope > .tree-key');
+      if (keyEl) {
+        let key = (keyEl.dataset.raw || keyEl.textContent).trim();
+        key = key.replace(/^\[(.+)\]$/, '$1'); // unwrap [index]
+        key = key.replace(/^@/, '');            // unwrap @attr
+        parts.unshift(key);
+      }
+    }
+    el = el.parentElement;
+  }
+  return parts.length ? parts.join('.') : null;
+}
+
+function stampRow(row, cls, glyph, oldValText) {
+  if (!row) return;
+  row.classList.add(cls);
+
+  if (!row.querySelector('.diff-gutter-mark')) {
+    const gm = document.createElement('span');
+    gm.className = 'diff-gutter-mark';
+    gm.textContent = glyph;
+    const anchor = row.querySelector('.toggle-btn') || row.querySelector('span[style]');
+    anchor ? row.insertBefore(gm, anchor) : row.appendChild(gm);
+  }
+
+  if (oldValText !== undefined) {
+    const valEl = row.querySelector('.tree-val');
+    if (valEl && !row.querySelector('.diff-old-val')) {
+      const ov = document.createElement('span');
+      ov.className = 'diff-old-val';
+      ov.textContent = oldValText;
+      valEl.parentNode.insertBefore(ov, valEl);
+      valEl.classList.add('diff-new-val');
+    }
+  }
+}
+
+function applyDiffToTrees(treeA, treeB, flatA, flatB) {
+  clearDiffHighlights(treeA);
+  clearDiffHighlights(treeB);
+
+  // Expand all so every row is in the DOM and path-walkable
+  treeA.querySelectorAll('.tree-children').forEach(c => c.classList.remove('collapsed'));
+  treeA.querySelectorAll('.toggle-btn').forEach(b => b.classList.replace('collapsed','expanded'));
+  treeB.querySelectorAll('.tree-children').forEach(c => c.classList.remove('collapsed'));
+  treeB.querySelectorAll('.toggle-btn').forEach(b => b.classList.replace('collapsed','expanded'));
+
+  const rowMapA = buildRowPathMap(treeA);
+  const rowMapB = buildRowPathMap(treeB);
+
+  const allPaths = new Set([...Object.keys(flatA), ...Object.keys(flatB)]);
+  let nAdded = 0, nRemoved = 0, nChanged = 0, nSame = 0;
+
+  for (const path of allPaths) {
+    const inA = path in flatA, inB = path in flatB;
+
+    if (inA && !inB) {
+      stampRow(rowMapA[path], 'dh-removed', '−');
+      nRemoved++;
+    } else if (!inA && inB) {
+      stampRow(rowMapB[path], 'dh-added', '+');
+      nAdded++;
+    } else {
+      const eA = flatA[path], eB = flatB[path];
+      if (eA.type !== eB.type) {
+        stampRow(rowMapA[path], 'dh-type', '⊕');
+        stampRow(rowMapB[path], 'dh-type', '⊕');
+        nChanged++;
+      } else if (String(eA.val) !== String(eB.val)) {
+        const oldStr = String(eA.val);
+        stampRow(rowMapA[path], 'dh-changed', '~');
+        stampRow(rowMapB[path], 'dh-changed', '~', oldStr);
+        nChanged++;
+      } else {
+        nSame++;
+      }
+    }
+  }
+
+  return { nAdded, nRemoved, nChanged, nSame };
+}
+
+/* ══════════════════════════════════════════════════════
+   DIFF POPUP — open with cloned + highlighted trees,
+   pixel-locked synchronized scrolling
+══════════════════════════════════════════════════════ */
+
+let popupSyncLock = false;
+
+function openDiffPopup() {
+  const flatA = slots.A.flat, flatB = slots.B.flat;
+
+  if (!Object.keys(flatA).length || !Object.keys(flatB).length) {
+    alert('Parse both A and B before running Diff.');
+    return;
+  }
+
+  // Clone the rendered trees into the popup panes
+  const srcA = $('treeOutputA'), srcB = $('treeOutputB');
+  const dstA = $('diffTreeA'),   dstB = $('diffTreeB');
+
+  dstA.innerHTML = srcA.innerHTML;
+  dstB.innerHTML = srcB.innerHTML;
+
+  // Copy all toggle listeners — just re-run setupToggle on every btn
+  [dstA, dstB].forEach(tree => {
+    tree.querySelectorAll('.toggle-btn').forEach(btn => {
+      const childrenEl = btn.closest('.tree-node')?.querySelector(':scope > .tree-children');
+      if (!childrenEl) return;
+      // Remove stale cloned listeners by replacing btn with clone
+      const fresh = btn.cloneNode(true);
+      btn.replaceWith(fresh);
+      setupToggle(fresh, childrenEl);
+      fresh.closest('.tree-row')?.addEventListener('click', e => {
+        if (!e.target.classList.contains('toggle-btn')) fresh.click();
+      });
+    });
+  });
+
+  // Apply diff highlighting to popup trees
+  const stats = applyDiffToTrees(dstA, dstB, flatA, flatB);
+
+  // Stats bar
+  const ps = $('popupStats');
+  ps.innerHTML = `
+    <span class="dstat dstat-add">${stats.nAdded} added</span>
+    <span class="dstat dstat-rem">${stats.nRemoved} removed</span>
+    <span class="dstat dstat-chg">${stats.nChanged} changed</span>
+    <span class="dstat dstat-same">${stats.nSame} same</span>`;
+
+  $('diffCountA').textContent = `${dstA.querySelectorAll('.tree-row').length} rows`;
+  $('diffCountB').textContent = `${dstB.querySelectorAll('.tree-row').length} rows`;
+
+  // Show popup
+  $('diffPopup').style.display = 'flex';
+  document.body.style.overflow = 'hidden';
+
+  // Wire pixel-perfect synchronized scroll
+  setupPopupSync();
+}
+
+function setupPopupSync() {
+  const sA = $('diffScrollA'), sB = $('diffScrollB');
+
+  // Remove previous listeners by cloning
+  const newA = sA.cloneNode(false);
+  const newB = sB.cloneNode(false);
+  // Move children
+  while (sA.firstChild) newA.appendChild(sA.firstChild);
+  while (sB.firstChild) newB.appendChild(sB.firstChild);
+  sA.parentNode.replaceChild(newA, sA);
+  sB.parentNode.replaceChild(newB, sB);
+
+  // Re-attach tree nodes (already moved)
+  // The trees dstA/dstB are now inside newA/newB
+
+  newA.addEventListener('scroll', () => {
+    if (popupSyncLock) return;
+    popupSyncLock = true;
+    newB.scrollTop  = newA.scrollTop;
+    newB.scrollLeft = newA.scrollLeft;
+    popupSyncLock = false;
+  }, { passive: true });
+
+  newB.addEventListener('scroll', () => {
+    if (popupSyncLock) return;
+    popupSyncLock = true;
+    newA.scrollTop  = newB.scrollTop;
+    newA.scrollLeft = newB.scrollLeft;
+    popupSyncLock = false;
+  }, { passive: true });
+}
+
+function closeDiffPopup() {
+  $('diffPopup').style.display = 'none';
+  document.body.style.overflow = '';
+  // Clear popup trees to free memory
+  $('diffTreeA').innerHTML = '';
+  $('diffTreeB').innerHTML = '';
+}
+
+$('runCompareBtn').addEventListener('click', openDiffPopup);
+$('closeDiffPopup').addEventListener('click', closeDiffPopup);
+
+// Close on backdrop click
+$('diffPopup').addEventListener('click', e => {
+  if (e.target === $('diffPopup')) closeDiffPopup();
+});
+
+// Esc closes popup
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && $('diffPopup').style.display !== 'none') closeDiffPopup();
+});
