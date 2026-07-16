@@ -344,7 +344,8 @@ kbd {
 /* ── Output Area ───────────────────────────────────── */
 .output-wrap {
   flex: 1;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 12px 0;
   position: relative;
 }
@@ -396,8 +397,9 @@ textarea::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3
   font-size: 13px;
   line-height: 1.65;
   padding: 12px 18px;
-  white-space: pre;
-  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow: visible;
   color: var(--text);
   tab-size: 2;
 }
@@ -418,10 +420,9 @@ textarea::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3
 .tree-output {
   font-family: var(--font-mono);
   font-size: 12.5px;
-  line-height: 1;
+  line-height: 1.6;
   padding: 4px 0 16px;
-  min-width: 100%;
-  width: max-content;
+  width: 100%;
 }
 
 .tree-node {
@@ -430,13 +431,14 @@ textarea::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3
 
 .tree-row {
   display: flex;
-  align-items: baseline;
-  padding: 0 6px 0 0;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  padding: 0 8px 0 0;
   min-height: 24px;
   cursor: default;
   border-radius: 4px;
   transition: background var(--transition);
-  white-space: nowrap;
+  white-space: normal;
   position: relative;
 }
 
@@ -456,6 +458,8 @@ textarea::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3
   width: 20px;
   position: relative;
   flex-shrink: 0;
+  align-self: stretch;
+  min-height: 24px;
 }
 .tree-line::before {
   content: '';
@@ -468,7 +472,7 @@ textarea::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3
 .tree-line::after {
   content: '';
   position: absolute;
-  left: 9px; top: 50%;
+  left: 9px; top: 12px;
   width: 8px; height: 1px;
   background: var(--border);
 }
@@ -484,7 +488,8 @@ textarea::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3
   font-size: 10px;
   flex-shrink: 0;
   margin-right: 6px;
-  align-self: center;
+  align-self: flex-start;
+  margin-top: 3px;
   transition: background var(--transition), color var(--transition);
   position: relative;
   z-index: 1;
@@ -507,6 +512,9 @@ textarea::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3
 
 .tree-val {
   font-weight: 400;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 .tree-val.v-str  { color: var(--syn-str); }
 .tree-val.v-num  { color: var(--syn-num); }
@@ -731,3 +739,517 @@ mark.sh {
   #searchInput { width: 100px; }
   .logo-tag { display: none; }
 }
+
+/* ══════════════════════════════════════════════════════
+   COMPARE MODE — full redesign
+══════════════════════════════════════════════════════ */
+
+.separator-v {
+  width: 1px; height: 20px;
+  background: var(--border2);
+  margin: 0 4px;
+}
+
+.mode-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 3px 6px;
+}
+
+/* ── Compare workspace: input strip on top, outputs fill rest ── */
+.compare-workspace {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 52px);
+  overflow: hidden;
+}
+
+/* ── Input strip ──────────────────────────────────── */
+.cmp-inputs {
+  display: flex;
+  flex-shrink: 0;
+  height: 220px;
+  border-bottom: 2px solid var(--border2);
+  background: var(--bg);
+}
+
+.cmp-input-slot {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.cmp-input-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 14px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.cmp-textarea-wrap {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.cmp-textarea-wrap textarea {
+  width: 100%; height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  border: none; outline: none; resize: none;
+  padding: 10px 14px;
+  caret-color: var(--accent);
+}
+.cmp-textarea-wrap textarea::placeholder { color: var(--text3); font-style: italic; }
+
+/* Middle diff trigger column */
+.cmp-mid {
+  width: 72px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: var(--bg2);
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+}
+
+.diff-trigger-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  background: var(--accent);
+  border: none;
+  border-radius: 10px;
+  color: #fff;
+  cursor: pointer;
+  padding: 10px 8px;
+  font-family: var(--font-ui);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  transition: opacity var(--transition), transform var(--transition);
+  width: 52px;
+}
+.diff-trigger-btn:hover  { opacity: 0.85; }
+.diff-trigger-btn:active { transform: scale(0.96); }
+.diff-trigger-btn svg { width: 20px; height: 20px; }
+
+.cmp-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: center;
+}
+
+.cmp-stat {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.cs-added   { background: rgba(62,207,142,0.15); color: var(--green); }
+.cs-removed { background: rgba(247,92,92,0.15);  color: var(--red); }
+.cs-changed { background: rgba(246,166,35,0.15); color: var(--amber); }
+
+/* action-btn for B */
+.action-btn-b { background: var(--pink); }
+
+/* slot badges */
+.slot-badge {
+  width: 22px; height: 22px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 5px;
+  font-size: 11px; font-weight: 800;
+  font-family: var(--font-ui);
+  background: rgba(79,142,247,0.18);
+  color: var(--accent);
+  border: 1px solid rgba(79,142,247,0.4);
+  flex-shrink: 0;
+}
+.slot-badge-b {
+  background: rgba(217,123,255,0.15);
+  color: var(--pink);
+  border-color: rgba(217,123,255,0.4);
+}
+
+/* ── Side-by-side outputs ─────────────────────────── */
+.cmp-outputs {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+.cmp-out-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.cmp-out-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 14px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.cmp-out-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--text3);
+  text-transform: uppercase;
+}
+
+.cmp-out-scroll {
+  flex: 1;
+  overflow-x: hidden;
+  overflow-y: auto;
+  position: relative;
+  padding: 8px 0;
+}
+
+/* scrollbar */
+.cmp-out-scroll::-webkit-scrollbar { width: 5px; height: 5px; }
+.cmp-out-scroll::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+/* centre divider between outputs */
+.cmp-out-divider {
+  width: 1px;
+  background: var(--border2);
+  flex-shrink: 0;
+  position: relative;
+}
+.cmp-out-divider .divider-line {
+  position: absolute;
+  top: 0; bottom: 0; left: 0; width: 1px;
+  background: linear-gradient(180deg, transparent 5%, var(--accent2) 30%, var(--accent) 70%, transparent 95%);
+  opacity: 0.4;
+}
+
+/* Legend bar */
+.diff-legend-bar {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 0 18px;
+  height: 30px;
+  background: var(--bg2);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.leg {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  font-family: var(--font-ui);
+}
+.leg-added   { color: var(--green); }
+.leg-removed { color: var(--red); }
+.leg-changed { color: var(--amber); }
+.leg-moved   { color: var(--pink); }
+
+/* ══════════════════════════════════════════════════════
+   DIFF HIGHLIGHTING — applied to tree rows in place
+══════════════════════════════════════════════════════ */
+.diff-tree .tree-row.dh-added {
+  background: rgba(62,207,142,0.10) !important;
+  border-left: 2px solid var(--green);
+}
+.diff-tree .tree-row.dh-removed {
+  background: rgba(247,92,92,0.10) !important;
+  border-left: 2px solid var(--red);
+}
+.diff-tree .tree-row.dh-changed {
+  background: rgba(246,166,35,0.10) !important;
+  border-left: 2px solid var(--amber);
+}
+.diff-tree .tree-row.dh-type {
+  background: rgba(217,123,255,0.10) !important;
+  border-left: 2px solid var(--pink);
+}
+
+/* Gutter markers inside diff rows */
+.diff-gutter-mark {
+  font-size: 10px;
+  font-weight: 800;
+  width: 14px;
+  flex-shrink: 0;
+  align-self: center;
+  margin-right: 2px;
+  margin-left: 2px;
+}
+.dh-added   .diff-gutter-mark { color: var(--green); }
+.dh-removed .diff-gutter-mark { color: var(--red); }
+.dh-changed .diff-gutter-mark { color: var(--amber); }
+.dh-type    .diff-gutter-mark { color: var(--pink); }
+
+/* Changed value: show old value in diff panel */
+.diff-old-val {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--red);
+  text-decoration: line-through;
+  opacity: 0.75;
+  margin-right: 5px;
+}
+.diff-new-val {
+  color: var(--green);
+}
+
+/* ── Responsive ─────────────────────────────────────── */
+@media (max-width: 700px) {
+  .workspace { flex-direction: column; }
+  .divider { width: 100%; height: 1px; }
+  .panel { min-height: 40vh; }
+  #searchInput { width: 100px; }
+  .logo-tag { display: none; }
+  .cmp-inputs { flex-direction: column; height: auto; }
+  .cmp-mid { width: 100%; height: 52px; flex-direction: row; }
+  .cmp-outputs { flex-direction: column; }
+}
+
+/* ══════════════════════════════════════════════════════
+   DIFF POPUP
+══════════════════════════════════════════════════════ */
+.diff-popup-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.72);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.diff-popup {
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 14px;
+  width: 100%;
+  max-width: 1100px;
+  height: 88vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 32px 100px rgba(0,0,0,0.7);
+}
+
+/* ── Popup header ──────────────────────────────────── */
+.diff-popup-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.diff-popup-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--text);
+  letter-spacing: 0.03em;
+  font-family: var(--font-ui);
+  white-space: nowrap;
+}
+
+.diff-popup-icon { color: var(--accent); }
+
+.diff-legend-inline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.dleg {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  font-family: var(--font-mono);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.dleg-added   { color: var(--green);  background: rgba(62,207,142,0.12); }
+.dleg-removed { color: var(--red);    background: rgba(247,92,92,0.12); }
+.dleg-changed { color: var(--amber);  background: rgba(246,166,35,0.12); }
+.dleg-type    { color: var(--pink);   background: rgba(217,123,255,0.12); }
+
+.diff-popup-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.dstat { padding: 2px 8px; border-radius: 4px; font-weight: 700; }
+.dstat-add { background: rgba(62,207,142,0.15);  color: var(--green); }
+.dstat-rem { background: rgba(247,92,92,0.15);   color: var(--red); }
+.dstat-chg { background: rgba(246,166,35,0.15);  color: var(--amber); }
+.dstat-same{ background: rgba(255,255,255,0.05); color: var(--text3); }
+
+/* ── Popup body: side-by-side panes ───────────────── */
+.diff-popup-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+.diff-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.diff-pane-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 14px;
+  background: var(--bg3);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.diff-pane-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--text3);
+  text-transform: uppercase;
+}
+
+.diff-pane-count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text3);
+}
+
+/* THE scroll container — this is what we sync */
+.diff-pane-scroll {
+  flex: 1;
+  overflow-x: hidden;
+  overflow-y: auto;
+  position: relative;
+}
+
+.diff-pane-scroll::-webkit-scrollbar { width: 5px; height: 5px; }
+.diff-pane-scroll::-webkit-scrollbar-track { background: transparent; }
+.diff-pane-scroll::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+.diff-pane-scroll::-webkit-scrollbar-thumb:hover { background: var(--text3); }
+
+.diff-pane-divider {
+  width: 1px;
+  flex-shrink: 0;
+  background: var(--border2);
+  position: relative;
+}
+.diff-pane-divider .divider-line {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, transparent 5%, var(--accent2) 35%, var(--accent) 65%, transparent 95%);
+  opacity: 0.5;
+}
+
+/* ── Diff row highlights (same classes, used in popup) ── */
+.diff-tree .tree-row.dh-added {
+  background: rgba(62,207,142,0.10) !important;
+  border-left: 3px solid var(--green);
+  padding-left: 3px;
+}
+.diff-tree .tree-row.dh-removed {
+  background: rgba(247,92,92,0.10) !important;
+  border-left: 3px solid var(--red);
+  padding-left: 3px;
+}
+.diff-tree .tree-row.dh-changed {
+  background: rgba(246,166,35,0.10) !important;
+  border-left: 3px solid var(--amber);
+  padding-left: 3px;
+}
+.diff-tree .tree-row.dh-type {
+  background: rgba(217,123,255,0.10) !important;
+  border-left: 3px solid var(--pink);
+  padding-left: 3px;
+}
+
+/* Gutter mark */
+.diff-gutter-mark {
+  font-size: 10px;
+  font-weight: 800;
+  width: 12px;
+  flex-shrink: 0;
+  align-self: center;
+  margin: 0 3px;
+}
+.dh-added   .diff-gutter-mark { color: var(--green); }
+.dh-removed .diff-gutter-mark { color: var(--red); }
+.dh-changed .diff-gutter-mark { color: var(--amber); }
+.dh-type    .diff-gutter-mark { color: var(--pink); }
+
+/* Old value strikethrough */
+.diff-old-val {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--red);
+  text-decoration: line-through;
+  opacity: 0.7;
+  margin-right: 4px;
+}
+.diff-new-val { color: var(--green); }
+
+/* ── Compare workspace stats strip ────────────────── */
+.cmp-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: center;
+}
+.cmp-stat {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.cs-added   { background: rgba(62,207,142,0.15);  color: var(--green); }
+.cs-removed { background: rgba(247,92,92,0.15);   color: var(--red); }
+.cs-changed { background: rgba(246,166,35,0.15);  color: var(--amber); }
