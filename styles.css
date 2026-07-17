@@ -498,6 +498,12 @@ textarea::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3
 .toggle-btn.collapsed::after { content: '+'; }
 .toggle-btn.expanded::after  { content: '−'; }
 
+.tree-spacer {
+  display: inline-block;
+  width: 22px;
+  flex-shrink: 0;
+}
+
 .tree-key {
   color: var(--syn-key);
   font-weight: 500;

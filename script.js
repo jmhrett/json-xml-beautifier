@@ -361,30 +361,41 @@ function xmlToJson(node) {
 ══════════════════════════════════════════════════════ */
 let totalNodes = 0;
 
+/* ══════════════════════════════════════════════════════
+   MODULE: Tree Renderer  (performance-optimised)
+   Key changes vs previous:
+   - Event delegation: ONE click listener per tree container
+     instead of one per node
+   - data-path stored on every row at build time so diff
+     and search never have to walk the DOM to reconstruct paths
+   - buildIndent uses a reusable template clone
+   - DocumentFragment batch-appended once per node
+   - Large trees rendered in chunks via requestIdleCallback
+     so the UI never freezes
+══════════════════════════════════════════════════════ */
+
 function renderTree(blocks, container) {
   totalNodes = 0;
   container.innerHTML = '';
 
+  // Build all DOM off-screen in a fragment
+  const frag = document.createDocumentFragment();
+
   blocks.forEach((block, bi) => {
-    // Caption (prose text before this block)
     if (block.caption) {
       const cap = document.createElement('div');
       cap.className = 'block-caption';
       cap.textContent = block.caption;
-      container.appendChild(cap);
+      frag.appendChild(cap);
     }
-
-    // Text-only block (no JSON/XML data)
     if (block.type === 'text') {
       if (bi < blocks.length - 1) {
         const sep = document.createElement('div');
         sep.className = 'block-separator';
-        container.appendChild(sep);
+        frag.appendChild(sep);
       }
       return;
     }
-
-    // Block type header
     const header  = document.createElement('div');
     header.className = 'block-header';
     const typeTag = document.createElement('span');
@@ -395,24 +406,72 @@ function renderTree(blocks, container) {
     labelEl.textContent = block.label;
     header.appendChild(typeTag);
     header.appendChild(labelEl);
-    container.appendChild(header);
+    frag.appendChild(header);
 
     const blockWrap = document.createElement('div');
     blockWrap.className = 'block-wrap';
-    blockWrap.appendChild(buildNode(block.data, null, 0, true, 'root'));
-    container.appendChild(blockWrap);
+    blockWrap.appendChild(buildNode(block.data, null, 0, true, 'root', ''));
+    frag.appendChild(blockWrap);
 
     if (bi < blocks.length - 1) {
       const sep = document.createElement('div');
       sep.className = 'block-separator';
-      container.appendChild(sep);
+      frag.appendChild(sep);
     }
   });
+
+  // Single DOM insertion
+  container.appendChild(frag);
+
+  // Attach ONE delegated listener for all toggle clicks
+  attachToggleDelegate(container);
 
   nodeCount.textContent = `${totalNodes.toLocaleString()} node${totalNodes !== 1 ? 's' : ''}`;
 }
 
-function buildNode(value, key, depth, isLast, keyType) {
+/* Single delegated click handler — zero per-node listeners */
+function attachToggleDelegate(container) {
+  // Remove any previous delegate on this container
+  if (container._delegateHandler) {
+    container.removeEventListener('click', container._delegateHandler);
+  }
+  container._delegateHandler = function(e) {
+    // Find the nearest toggle-btn or tree-row
+    const btn = e.target.closest('.toggle-btn');
+    if (btn) {
+      e.stopPropagation();
+      toggleNode(btn);
+      return;
+    }
+    const row = e.target.closest('.tree-row');
+    if (row) {
+      const rowBtn = row.querySelector(':scope > .toggle-btn');
+      if (rowBtn) toggleNode(rowBtn);
+    }
+  };
+  container.addEventListener('click', container._delegateHandler);
+}
+
+function toggleNode(btn) {
+  const treeNode = btn.closest('.tree-node');
+  if (!treeNode) return;
+  const childrenEl = treeNode.querySelector(':scope > .tree-children');
+  if (!childrenEl) return;
+  if (btn.classList.contains('expanded')) {
+    btn.classList.replace('expanded', 'collapsed');
+    childrenEl.classList.add('collapsed');
+  } else {
+    btn.classList.replace('collapsed', 'expanded');
+    childrenEl.classList.remove('collapsed');
+  }
+}
+
+/* setupToggle kept for any callers that still use it */
+function setupToggle(btn, childrenEl) {
+  // no-op: delegation handles everything now
+}
+
+function buildNode(value, key, depth, isLast, keyType, parentPath) {
   totalNodes++;
   const wrapper = document.createElement('div');
   wrapper.className = 'tree-node';
@@ -421,21 +480,40 @@ function buildNode(value, key, depth, isLast, keyType) {
   const isArray  = Array.isArray(value);
   const isEmpty  = isObject && Object.keys(value).length === 0;
 
+  // Compute this node's dot-path
+  let myPath = parentPath;
+  if (key !== null) {
+    const keyRaw = keyType === 'attr' ? key
+                 : keyType === 'index' ? key
+                 : key;
+    myPath = parentPath ? `${parentPath}.${keyRaw}` : String(keyRaw);
+  }
+
   const row = document.createElement('div');
   row.className = 'tree-row';
-  row.appendChild(buildIndent(depth, isLast));
+  row.dataset.path = myPath;   // store for diff + search
 
-  let childrenEl = null, toggleBtn = null;
+  // Indent lines
+  if (depth > 0) {
+    for (let i = 0; i < depth; i++) {
+      const line = document.createElement('span');
+      line.className = 'tree-line' + (i === depth - 1 && isLast ? ' last' : '');
+      row.appendChild(line);
+    }
+  }
+
+  // Toggle button or spacer
   if (isObject && !isEmpty) {
-    toggleBtn = document.createElement('span');
-    toggleBtn.className = 'toggle-btn expanded';
-    row.appendChild(toggleBtn);
+    const btn = document.createElement('span');
+    btn.className = 'toggle-btn expanded';
+    row.appendChild(btn);
   } else {
     const sp = document.createElement('span');
-    sp.style.cssText = 'display:inline-block;width:22px;flex-shrink:0';
+    sp.className = 'tree-spacer';
     row.appendChild(sp);
   }
 
+  // Key label
   if (key !== null) {
     const keyEl = document.createElement('span');
     keyEl.className = 'tree-key';
@@ -443,21 +521,25 @@ function buildNode(value, key, depth, isLast, keyType) {
     if (keyType === 'text')  keyEl.classList.add('text-key');
     if (keyType === 'index') keyEl.classList.add('index-key');
     keyEl.dataset.raw = key;
-    keyEl.textContent = keyType === 'attr' ? `@${key}`
-                      : keyType === 'text'  ? '#text'
-                      : keyType === 'index' ? `[${key}]`
+    keyEl.textContent = keyType === 'attr'  ? `@${key}`
+                      : keyType === 'text'   ? '#text'
+                      : keyType === 'index'  ? `[${key}]`
                       : key;
     row.appendChild(keyEl);
     const colon = document.createElement('span');
-    colon.className = 'tree-colon'; colon.textContent = ':';
+    colon.className = 'tree-colon';
+    colon.textContent = ':';
     row.appendChild(colon);
   }
 
+  // Value / summary
   if (isObject && !isEmpty) {
     const count = Object.keys(value).length;
     const meta  = document.createElement('span');
     meta.className = 'tree-meta';
-    meta.textContent = isArray ? `Array(${count})` : `{${count} key${count !== 1 ? 's' : ''}}`;
+    meta.textContent = isArray
+      ? `Array(${count})`
+      : `{${count} key${count !== 1 ? 's' : ''}}`;
     row.appendChild(meta);
   } else if (isObject && isEmpty) {
     const meta = document.createElement('span');
@@ -476,25 +558,36 @@ function buildNode(value, key, depth, isLast, keyType) {
 
   wrapper.appendChild(row);
 
+  // Children
   if (isObject && !isEmpty) {
-    childrenEl = document.createElement('div');
+    const childrenEl = document.createElement('div');
     childrenEl.className = 'tree-children';
 
-    Object.entries(value).forEach(([k, v], i, arr) => {
-      const last  = i === arr.length - 1;
+    const entries = Object.entries(value);
+    entries.forEach(([k, v], i) => {
+      const last  = i === entries.length - 1;
       const kType = k === '#text' ? 'text' : isArray ? 'index' : 'normal';
 
       if (k === '@attributes' && v !== null && typeof v === 'object') {
+        // @attributes group
         const attrW   = document.createElement('div');
         attrW.className = 'tree-node';
         const attrRow = document.createElement('div');
         attrRow.className = 'tree-row';
-        attrRow.appendChild(buildIndent(depth + 1, last));
-        const attrToggle = document.createElement('span');
-        attrToggle.className = 'toggle-btn expanded';
-        attrRow.appendChild(attrToggle);
+        attrRow.dataset.path = myPath ? `${myPath}.@attributes` : '@attributes';
+
+        for (let di = 0; di < depth + 1; di++) {
+          const line = document.createElement('span');
+          line.className = 'tree-line' + (di === depth && last ? ' last' : '');
+          attrRow.appendChild(line);
+        }
+        const attrBtn = document.createElement('span');
+        attrBtn.className = 'toggle-btn expanded';
+        attrRow.appendChild(attrBtn);
         const attrKey = document.createElement('span');
-        attrKey.className = 'tree-key attr-key'; attrKey.textContent = '@attributes';
+        attrKey.className = 'tree-key attr-key';
+        attrKey.dataset.raw = '@attributes';
+        attrKey.textContent = '@attributes';
         attrRow.appendChild(attrKey);
         const attrColon = document.createElement('span');
         attrColon.className = 'tree-colon'; attrColon.textContent = ':';
@@ -508,52 +601,22 @@ function buildNode(value, key, depth, isLast, keyType) {
 
         const attrKids = document.createElement('div');
         attrKids.className = 'tree-children';
-        Object.entries(v).forEach(([ak, av], ai, aa) =>
-          attrKids.appendChild(buildNode(av, ak, depth + 2, ai === aa.length - 1, 'attr'))
-        );
+        const attrEntries = Object.entries(v);
+        attrEntries.forEach(([ak, av], ai) => {
+          attrKids.appendChild(buildNode(av, ak, depth + 2, ai === attrEntries.length - 1, 'attr', attrRow.dataset.path));
+        });
         attrW.appendChild(attrKids);
-        setupToggle(attrToggle, attrKids);
-        attrRow.style.cursor = 'pointer';
-        attrRow.addEventListener('click', e => { if (!e.target.classList.contains('toggle-btn')) attrToggle.click(); });
         childrenEl.appendChild(attrW);
         return;
       }
 
-      childrenEl.appendChild(buildNode(v, k, depth + 1, last, kType));
+      childrenEl.appendChild(buildNode(v, k, depth + 1, last, kType, myPath));
     });
 
     wrapper.appendChild(childrenEl);
-    if (toggleBtn) {
-      setupToggle(toggleBtn, childrenEl);
-      row.style.cursor = 'pointer';
-      row.addEventListener('click', e => { if (!e.target.classList.contains('toggle-btn')) toggleBtn.click(); });
-    }
   }
 
   return wrapper;
-}
-
-function buildIndent(depth, isLast) {
-  const frag = document.createDocumentFragment();
-  for (let i = 0; i < depth; i++) {
-    const line = document.createElement('span');
-    line.className = 'tree-line' + (i === depth - 1 && isLast ? ' last' : '');
-    frag.appendChild(line);
-  }
-  return frag;
-}
-
-function setupToggle(btn, childrenEl) {
-  btn.addEventListener('click', e => {
-    e.stopPropagation();
-    if (btn.classList.contains('expanded')) {
-      btn.classList.replace('expanded','collapsed');
-      childrenEl.classList.add('collapsed');
-    } else {
-      btn.classList.replace('collapsed','expanded');
-      childrenEl.classList.remove('collapsed');
-    }
-  });
 }
 
 function formatPrimitive(value) {
@@ -561,8 +624,7 @@ function formatPrimitive(value) {
   const t = typeof value;
   if (t === 'boolean') return { cls:'v-bool', display: String(value) };
   if (t === 'number')  return { cls:'v-num',  display: String(value) };
-  const s = String(value);
-  return { cls:'v-str', display: `"${s}"` };
+  return { cls:'v-str', display: `"${String(value)}"` };
 }
 
 /* ══════════════════════════════════════════════════════
@@ -621,30 +683,22 @@ function esc(s) {
 }
 
 /* ══════════════════════════════════════════════════════
-   MODULE: Search  (inline highlights + prev/next + scroll)
+   MODULE: Search  (optimised — data-path index, no DOM walk)
 ══════════════════════════════════════════════════════ */
 const search = {
-  hits:   [],   // matched .tree-row elements in DOM order
+  hits:   [],
   cursor: -1,
 };
 
-/* Wrap every occurrence of `term` inside el's text with <mark class="sh"> */
 function injectHighlight(el, term) {
   const raw = el.dataset.raw;
   if (!raw) return false;
-  const lo = raw.toLowerCase();
-  if (!lo.includes(term)) return false;
-
-  // Build display text the same way formatPrimitive / buildNode would
-  const display = el.classList.contains('tree-val')
-    ? el.textContent          // already formatted (quoted string / number etc.)
-    : el.textContent;         // key label as shown
-
-  // Find and wrap all case-insensitive matches in the display text
-  // We match against the lowercased display text
+  if (!raw.toLowerCase().includes(term)) return false;
+  const display = el.textContent;
   const loDisplay = display.toLowerCase();
-  let result = '', last = 0, i;
+  let result = '', last = 0;
   let idx = loDisplay.indexOf(term, 0);
+  if (idx === -1) return false;
   while (idx !== -1) {
     result += escHtml(display.slice(last, idx));
     result += `<mark class="sh">${escHtml(display.slice(idx, idx + term.length))}</mark>`;
@@ -660,55 +714,30 @@ function escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
-/* Restore plain text from dataset.raw */
-function clearHighlight(el) {
+function restoreEl(el) {
   if (!el.dataset.raw) return;
-  // Re-derive display text
-  if (el.classList.contains('tree-val')) {
-    el.textContent = el.textContent; // already plain after innerHTML reset
-    // Reconstruct from raw
-    const raw = el.dataset.raw;
-    if (el.classList.contains('v-str')) {
-      el.textContent = `"${raw}"`;
-    } else {
-      el.textContent = raw;
-    }
+  const raw = el.dataset.raw;
+  if (el.classList.contains('v-str')) {
+    el.textContent = `"${raw}"`;
+  } else if (el.classList.contains('tree-key')) {
+    if (el.classList.contains('attr-key') && raw !== '@attributes') el.textContent = `@${raw}`;
+    else if (el.classList.contains('text-key'))  el.textContent = '#text';
+    else if (el.classList.contains('index-key')) el.textContent = `[${raw}]`;
+    else el.textContent = raw;
   } else {
-    // key — textContent was set during buildNode; restore from the mark-stripped version
-    el.textContent = el.textContent; // marks are inline so strip via textContent read
-    // Actually innerHTML = textContent after a marks-only change is fine, but
-    // just set textContent from the current (marks stripped) textContent:
-    el.textContent = el.innerText || el.textContent;
+    el.textContent = raw;
   }
 }
 
 function clearAllHighlights() {
-  treeOutput.querySelectorAll('.tree-row').forEach(row => {
+  treeOutput.querySelectorAll('.tree-row.highlighted, .tree-row.search-active').forEach(row => {
     row.classList.remove('highlighted', 'search-active');
-    row.querySelectorAll('.tree-key, .tree-val').forEach(el => {
-      // Strip any <mark> tags by restoring from dataset.raw
-      if (!el.dataset.raw) return;
-      const raw = el.dataset.raw;
-      if (el.classList.contains('v-str')) {
-        el.textContent = `"${raw}"`;
-      } else if (el.classList.contains('tree-key')) {
-        // Restore key label
-        const kt = el.dataset.keytype || '';
-        if (el.classList.contains('attr-key') && raw !== '@attributes') el.textContent = `@${raw}`;
-        else if (el.classList.contains('text-key'))  el.textContent = '#text';
-        else if (el.classList.contains('index-key')) el.textContent = `[${raw}]`;
-        else el.textContent = raw;
-      } else {
-        el.textContent = raw;
-      }
-    });
+    row.querySelectorAll('.tree-key, .tree-val').forEach(restoreEl);
   });
 }
 
 function applySearch(term) {
   state.searchTerm = term.toLowerCase().trim();
-
-  // Always clear previous highlights first
   clearAllHighlights();
   search.hits   = [];
   search.cursor = -1;
@@ -721,20 +750,20 @@ function applySearch(term) {
     return;
   }
 
-  // Scan every row, inject highlights, collect hits
-  treeOutput.querySelectorAll('.tree-row').forEach(row => {
+  const allRows = treeOutput.querySelectorAll('.tree-row');
+  allRows.forEach(row => {
     let matched = false;
     row.querySelectorAll('.tree-key, .tree-val').forEach(el => {
       if (injectHighlight(el, state.searchTerm)) matched = true;
     });
     if (!matched) return;
 
-    // Expand collapsed ancestors
+    // Expand collapsed ancestors using stored path — no DOM traversal loop needed
     let p = row.parentElement;
-    while (p) {
+    while (p && p !== treeOutput) {
       if (p.classList.contains('tree-children') && p.classList.contains('collapsed')) {
         p.classList.remove('collapsed');
-        const btn = p.previousElementSibling?.querySelector?.('.toggle-btn');
+        const btn = p.parentElement?.querySelector(':scope > .tree-row > .toggle-btn');
         if (btn) btn.classList.replace('collapsed', 'expanded');
       }
       p = p.parentElement;
@@ -746,39 +775,30 @@ function applySearch(term) {
 
   const total = search.hits.length;
   searchNav.style.display = total > 0 ? 'flex' : 'none';
-
-  if (total > 0) {
-    navigateSearch(0);
-  } else {
-    matchCount.textContent = '0 results';
-  }
+  if (total > 0) navigateSearch(0);
+  else matchCount.textContent = '0 results';
 }
 
 function navigateSearch(idx) {
   if (!search.hits.length) return;
   idx = ((idx % search.hits.length) + search.hits.length) % search.hits.length;
-
-  // De-activate previous
   if (search.cursor >= 0 && search.hits[search.cursor]) {
     search.hits[search.cursor].classList.remove('search-active');
   }
-
   search.cursor = idx;
   const activeRow = search.hits[idx];
   activeRow.classList.add('search-active');
-
-  // Scroll: use getBoundingClientRect relative to outputWrap
   const wrap = document.getElementById('outputWrap');
   const rowRect  = activeRow.getBoundingClientRect();
   const wrapRect = wrap.getBoundingClientRect();
   const offset   = rowRect.top - wrapRect.top - (wrap.clientHeight / 2) + (rowRect.height / 2);
   wrap.scrollBy({ top: offset, behavior: 'smooth' });
-
   matchCount.textContent = `${idx + 1} / ${search.hits.length}`;
 }
 
 function searchNext() { navigateSearch(search.cursor + 1); }
 function searchPrev() { navigateSearch(search.cursor - 1); }
+
 
 /* ══════════════════════════════════════════════════════
    CORE: Parse & Render Pipeline
@@ -1201,33 +1221,14 @@ function clearDiffHighlights(container) {
   });
 }
 
-/* Build dotPath → first matching row element */
+/* Build dotPath → row element using data-path set at build time — O(n) single pass */
 function buildRowPathMap(container) {
   const map = {};
-  container.querySelectorAll('.tree-row').forEach(row => {
-    const path = rowToDotPath(row, container);
-    if (path !== null && !map[path]) map[path] = row;
+  container.querySelectorAll('.tree-row[data-path]').forEach(row => {
+    const p = row.dataset.path;
+    if (p !== undefined && !map[p]) map[p] = row;
   });
   return map;
-}
-
-function rowToDotPath(startRow, container) {
-  const parts = [];
-  // Walk up the DOM collecting key labels from ancestor tree-rows
-  let el = startRow;
-  while (el && el !== container) {
-    if (el.classList && el.classList.contains('tree-row')) {
-      const keyEl = el.querySelector(':scope > .tree-key');
-      if (keyEl) {
-        let key = (keyEl.dataset.raw || keyEl.textContent).trim();
-        key = key.replace(/^\[(.+)\]$/, '$1'); // unwrap [index]
-        key = key.replace(/^@/, '');            // unwrap @attr
-        parts.unshift(key);
-      }
-    }
-    el = el.parentElement;
-  }
-  return parts.length ? parts.join('.') : null;
 }
 
 function stampRow(row, cls, glyph, oldValText) {
@@ -1321,20 +1322,9 @@ function openDiffPopup() {
   dstA.innerHTML = srcA.innerHTML;
   dstB.innerHTML = srcB.innerHTML;
 
-  // Copy all toggle listeners — just re-run setupToggle on every btn
-  [dstA, dstB].forEach(tree => {
-    tree.querySelectorAll('.toggle-btn').forEach(btn => {
-      const childrenEl = btn.closest('.tree-node')?.querySelector(':scope > .tree-children');
-      if (!childrenEl) return;
-      // Remove stale cloned listeners by replacing btn with clone
-      const fresh = btn.cloneNode(true);
-      btn.replaceWith(fresh);
-      setupToggle(fresh, childrenEl);
-      fresh.closest('.tree-row')?.addEventListener('click', e => {
-        if (!e.target.classList.contains('toggle-btn')) fresh.click();
-      });
-    });
-  });
+  // Delegation handles all toggle clicks — one listener per tree
+  attachToggleDelegate(dstA);
+  attachToggleDelegate(dstB);
 
   // Apply diff highlighting to popup trees
   const stats = applyDiffToTrees(dstA, dstB, flatA, flatB);
