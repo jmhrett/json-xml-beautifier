@@ -799,6 +799,90 @@ function navigateSearch(idx) {
 function searchNext() { navigateSearch(search.cursor + 1); }
 function searchPrev() { navigateSearch(search.cursor - 1); }
 
+/* ══════════════════════════════════════════════════════
+   TEXT VIEW SEARCH
+   Works on the rendered <pre> innerHTML via a simple
+   mark-injection pass. No DOM tree walking needed.
+══════════════════════════════════════════════════════ */
+const textSearch = { hits: [], cursor: -1, rawHTML: '' };
+
+function applyTextSearch(term) {
+  term = term.trim();
+  const searchNav = $('searchNav');
+  textSearch.hits   = [];
+  textSearch.cursor = -1;
+
+  // Restore original HTML if we have it
+  if (textSearch.rawHTML) textOutput.innerHTML = textSearch.rawHTML;
+
+  if (!term) {
+    matchCount.textContent  = '';
+    searchNav.style.display = 'none';
+    textSearch.rawHTML = '';
+    return;
+  }
+
+  // Save clean HTML before injecting marks
+  textSearch.rawHTML = textOutput.innerHTML;
+
+  // Work on a plain-text copy to find match positions,
+  // then inject <mark> into the HTML safely via TreeWalker
+  const termLo  = term.toLowerCase();
+  let   hitCount = 0;
+
+  // Walk all text nodes inside textOutput and wrap matches
+  const walker = document.createTreeWalker(textOutput, NodeFilter.SHOW_TEXT);
+  const textnodes = [];
+  let n;
+  while ((n = walker.nextNode())) textnodes.push(n);
+
+  textnodes.forEach(node => {
+    const text = node.nodeValue;
+    const lo   = text.toLowerCase();
+    if (!lo.includes(termLo)) return;
+
+    const frag = document.createDocumentFragment();
+    let last = 0;
+    let idx  = lo.indexOf(termLo, 0);
+    while (idx !== -1) {
+      if (idx > last) frag.appendChild(document.createTextNode(text.slice(last, idx)));
+      const mark = document.createElement('mark');
+      mark.className = 'sh ts-hit';
+      mark.dataset.hit = hitCount++;
+      mark.textContent = text.slice(idx, idx + term.length);
+      frag.appendChild(mark);
+      last = idx + term.length;
+      idx  = lo.indexOf(termLo, last);
+    }
+    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+    node.parentNode.replaceChild(frag, node);
+  });
+
+  textSearch.hits = Array.from(textOutput.querySelectorAll('mark.ts-hit'));
+  const total     = textSearch.hits.length;
+  searchNav.style.display = total > 0 ? 'flex' : 'none';
+
+  if (total > 0) textNavigate(0);
+  else matchCount.textContent = '0 results';
+}
+
+function textNavigate(idx) {
+  if (!textSearch.hits.length) return;
+  idx = ((idx % textSearch.hits.length) + textSearch.hits.length) % textSearch.hits.length;
+
+  if (textSearch.cursor >= 0 && textSearch.hits[textSearch.cursor]) {
+    textSearch.hits[textSearch.cursor].classList.remove('ts-active');
+  }
+  textSearch.cursor = idx;
+  const mark = textSearch.hits[idx];
+  mark.classList.add('ts-active');
+  mark.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  matchCount.textContent = `${idx + 1} / ${textSearch.hits.length}`;
+}
+
+function textSearchNext() { textNavigate(textSearch.cursor + 1); }
+function textSearchPrev() { textNavigate(textSearch.cursor - 1); }
+
 
 /* ══════════════════════════════════════════════════════
    CORE: Parse & Render Pipeline
@@ -832,8 +916,10 @@ function renderOutput() {
   emptyState.style.display = 'none';
   // Reset search state on every render
   search.hits = []; search.cursor = -1;
+  textSearch.hits = []; textSearch.cursor = -1; textSearch.rawHTML = '';
   $('searchNav').style.display = 'none';
   matchCount.textContent = '';
+  searchInput.value = '';
   if (state.view === 'tree') {
     treeOutput.style.display = 'block';
     textOutput.style.display = 'none';
@@ -971,12 +1057,14 @@ collapseAllBtn.addEventListener('click', collapseAll);
 copyBtn.addEventListener('click',        copyOutput);
 downloadBtn.addEventListener('click',    downloadOutput);
 
-// Search — input triggers fresh search
+// Search — input triggers fresh search (tree + text view)
 let searchTimer;
 searchInput.addEventListener('input', () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
-    if (state.view === 'tree' && state.blocks.length) applySearch(searchInput.value);
+    if (!state.blocks.length) return;
+    if (state.view === 'tree') applySearch(searchInput.value);
+    else applyTextSearch(searchInput.value);
   }, 180);
 });
 
@@ -984,11 +1072,16 @@ searchInput.addEventListener('input', () => {
 searchInput.addEventListener('keydown', e => {
   if (e.key === 'Enter') {
     e.preventDefault();
-    if (e.shiftKey) searchPrev(); else searchNext();
+    if (state.view === 'tree') {
+      if (e.shiftKey) searchPrev(); else searchNext();
+    } else {
+      if (e.shiftKey) textSearchPrev(); else textSearchNext();
+    }
   }
   if (e.key === 'Escape') {
     searchInput.value = '';
-    applySearch('');
+    if (state.view === 'tree') applySearch('');
+    else applyTextSearch('');
   }
 });
 
