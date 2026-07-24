@@ -152,18 +152,16 @@ function extractBlocks(src) {
         if (errEl) {
           const partial = tryRepairXML(xmlChunk.text);
           if (partial) {
-            flushBlock({ type:'xml', label:`XML #${blockIdx} (repaired)`, data: partial });
+            flushBlock({ type:'xml', label:`XML #${blockIdx} (repaired)`, data: partial.data, rawXml: partial.rawXml, xmlDoc: partial.xmlDoc });
             warnings.push(`XML block at pos ${pos} had errors — partially recovered.`);
           } else {
-            // Not valid XML — fold back as plain text, no warning spam
             pendingCaption += xmlChunk.text;
             blockIdx--;
           }
         } else {
-          flushBlock({ type:'xml', label:`XML #${blockIdx}`, data: xmlToJson(doc) });
+          flushBlock({ type:'xml', label:`XML #${blockIdx}`, data: xmlToJson(doc), rawXml: xmlChunk.text, xmlDoc: doc });
         }
       } catch (e) {
-        // Exception — fold back as plain text silently
         pendingCaption += xmlChunk.text;
         blockIdx--;
       }
@@ -305,7 +303,9 @@ function tryRepairXML(str) {
     const attempt = lines.slice(0, i).join('\n').trim();
     if (!attempt) continue;
     const doc = new DOMParser().parseFromString(attempt, 'text/xml');
-    if (!doc.querySelector('parsererror')) return xmlToJson(doc);
+    if (!doc.querySelector('parsererror')) {
+      return { data: xmlToJson(doc), xmlDoc: doc, rawXml: attempt };
+    }
   }
   return null;
 }
@@ -362,6 +362,300 @@ function xmlToJson(node) {
 let totalNodes = 0;
 
 /* ══════════════════════════════════════════════════════
+   MODULE: XML Beautifier & XML Tree Renderer
+   XML blocks are displayed as real XML — not JSON.
+   Tree view shows collapsible <tag attr="v"> nodes.
+   Text view shows indented, syntax-highlighted XML.
+══════════════════════════════════════════════════════ */
+
+/* ── Beautify XML: re-serialize with proper indentation ── */
+function beautifyXML(xmlString, indentSize) {
+  const doc = new DOMParser().parseFromString(xmlString, 'text/xml');
+  if (doc.querySelector('parsererror')) return xmlString; // return as-is if broken
+  const pad = ' '.repeat(indentSize);
+  return serializeNode(doc.documentElement, 0, pad);
+}
+
+function serializeNode(node, depth, pad) {
+  const indent = pad.repeat(depth);
+
+  if (node.nodeType === Node.TEXT_NODE) {
+    const v = node.nodeValue.replace(/^\s+|\s+$/g, '');
+    return v ? indent + v : '';
+  }
+  if (node.nodeType === Node.CDATA_SECTION_NODE) {
+    return indent + '<![CDATA[' + node.nodeValue + ']]>';
+  }
+  if (node.nodeType === Node.COMMENT_NODE) {
+    return indent + '<!--' + node.nodeValue + '-->';
+  }
+  if (node.nodeType === Node.PROCESSING_INSTRUCTION_NODE) {
+    return indent + '<?' + node.target + ' ' + node.data + '?>';
+  }
+  if (node.nodeType !== Node.ELEMENT_NODE) return '';
+
+  // Build opening tag
+  let open = indent + '<' + node.tagName;
+  for (const attr of node.attributes) {
+    open += ' ' + attr.name + '="' + attr.value.replace(/"/g, '&quot;') + '"';
+  }
+
+  const children = Array.from(node.childNodes).filter(n => {
+    if (n.nodeType === Node.TEXT_NODE) return n.nodeValue.trim().length > 0;
+    return true;
+  });
+
+  if (children.length === 0) {
+    return open + ' />';
+  }
+
+  // Single text-only child — inline
+  if (children.length === 1 && children[0].nodeType === Node.TEXT_NODE) {
+    const text = children[0].nodeValue.trim();
+    return open + '>' + escXml(text) + '</' + node.tagName + '>';
+  }
+
+  // Multiple / element children — block
+  const childLines = children
+    .map(c => serializeNode(c, depth + 1, pad))
+    .filter(Boolean);
+  return open + '>\n' + childLines.join('\n') + '\n' + indent + '</' + node.tagName + '>';
+}
+
+function escXml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/* ── Syntax-highlight beautified XML for text view ── */
+function syntaxHighlightXML(str) {
+  // Tokenise: tags, attributes, text, comments, CDATA
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, ' LT ')
+    .replace(/>/g, ' GT ')
+    // restore and wrap: comments
+    .replace(/ LT (!--[\s\S]*?--) GT /g,
+      (_, c) => `<span class="sx-comment">&lt;${c.replace(/ LT /g,'&lt;').replace(/ GT /g,'&gt;')}&gt;</span>`)
+    // CDATA
+    .replace(/ LT (!\[CDATA\[[\s\S]*?]]) GT /g,
+      (_, c) => `<span class="sx-cdata">&lt;${c}&gt;</span>`)
+    // closing tags
+    .replace(/ LT (\/[\w:.-]+) GT /g,
+      (_, t) => `<span class="sx-tag">&lt;${t}&gt;</span>`)
+    // self-closing or opening tags with optional attrs
+    .replace(/ LT (\??)(\/?)([\w:.-]+)((?:\s+[\w:.-]+="[^"]*")*)\s*(\/?\?) GT /g,
+      (_, pi, slash, name, attrs, end) => {
+        const tagSpan  = `<span class="sx-tag">&lt;${pi}${slash}</span><span class="sx-tagname">${name}</span>`;
+        const attrSpan = attrs.replace(/\s+([\w:.-]+)="([^"]*)"/g, (__, k, v) =>
+          ` <span class="sx-attr-name">${k}</span>=<span class="sx-attr-val">"${v}"</span>`);
+        const endSpan  = `<span class="sx-tag">${end}&gt;</span>`;
+        return tagSpan + attrSpan + endSpan;
+      })
+    // remaining LT/GT tokens
+    .replace(/ LT /g, '&lt;')
+    .replace(/ GT /g, '&gt;');
+}
+
+/* ── Build XML tree (collapsible) in the tree view ── */
+function buildXMLTree(blocks, frag) {
+  blocks.forEach((block, bi) => {
+    if (block.caption) {
+      const cap = document.createElement('div');
+      cap.className = 'block-caption';
+      cap.textContent = block.caption;
+      frag.appendChild(cap);
+    }
+    if (block.type === 'text') return;
+
+    const header  = document.createElement('div');
+    header.className = 'block-header';
+    const typeTag = document.createElement('span');
+    typeTag.className = `block-type-tag ${block.type}`;
+    typeTag.textContent = block.type.toUpperCase();
+    const labelEl = document.createElement('span');
+    labelEl.className = 'block-label';
+    labelEl.textContent = block.label;
+    header.appendChild(typeTag);
+    header.appendChild(labelEl);
+    frag.appendChild(header);
+
+    if (block.type === 'xml' && block.xmlDoc) {
+      const blockWrap = document.createElement('div');
+      blockWrap.className = 'block-wrap';
+      buildXMLNode(block.xmlDoc.documentElement, blockWrap, 0, true, '');
+      frag.appendChild(blockWrap);
+    } else {
+      // JSON block — use existing buildNode
+      const blockWrap = document.createElement('div');
+      blockWrap.className = 'block-wrap';
+      blockWrap.appendChild(buildNode(block.data, null, 0, true, 'root', ''));
+      frag.appendChild(blockWrap);
+    }
+
+    if (bi < blocks.length - 1) {
+      const sep = document.createElement('div');
+      sep.className = 'block-separator';
+      frag.appendChild(sep);
+    }
+  });
+}
+
+function buildXMLNode(el, parent, depth, isLast, parentPath) {
+  totalNodes++;
+  const tag = el.tagName;
+  const myPath = parentPath ? `${parentPath}.${tag}` : tag;
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'tree-node';
+
+  const kids = Array.from(el.childNodes).filter(n => {
+    if (n.nodeType === Node.TEXT_NODE) return n.nodeValue.trim().length > 0;
+    return n.nodeType === Node.ELEMENT_NODE || n.nodeType === Node.CDATA_SECTION_NODE;
+  });
+  const hasChildren = kids.length > 0;
+
+  // Opening row: <tagName attr="val" …>
+  const row = document.createElement('div');
+  row.className = 'tree-row xml-row';
+  row.dataset.path = myPath;
+
+  // Indent
+  for (let i = 0; i < depth; i++) {
+    const line = document.createElement('span');
+    line.className = 'tree-line' + (i === depth - 1 && isLast ? ' last' : '');
+    row.appendChild(line);
+  }
+
+  // Toggle or spacer
+  if (hasChildren) {
+    const btn = document.createElement('span');
+    btn.className = 'toggle-btn expanded';
+    row.appendChild(btn);
+  } else {
+    const sp = document.createElement('span');
+    sp.className = 'tree-spacer';
+    row.appendChild(sp);
+  }
+
+  // <tagName
+  const lt = document.createElement('span');
+  lt.className = 'xml-punct'; lt.textContent = '<';
+  row.appendChild(lt);
+  const tagEl = document.createElement('span');
+  tagEl.className = 'xml-tagname';
+  tagEl.dataset.raw = tag;
+  tagEl.textContent = tag;
+  row.appendChild(tagEl);
+
+  // attributes inline
+  for (const attr of el.attributes) {
+    const sp2 = document.createElement('span');
+    sp2.className = 'xml-attr-name';
+    sp2.dataset.raw = attr.name;
+    sp2.textContent = ' ' + attr.name;
+    row.appendChild(sp2);
+    const eq = document.createElement('span');
+    eq.className = 'xml-punct'; eq.textContent = '=';
+    row.appendChild(eq);
+    const av = document.createElement('span');
+    av.className = 'xml-attr-val';
+    av.dataset.raw = attr.value;
+    av.textContent = '"' + attr.value + '"';
+    row.appendChild(av);
+  }
+
+  // Self-closing or open
+  if (!hasChildren) {
+    const sc = document.createElement('span');
+    sc.className = 'xml-punct'; sc.textContent = ' />';
+    row.appendChild(sc);
+  } else {
+    const gt = document.createElement('span');
+    gt.className = 'xml-punct'; gt.textContent = '>';
+    row.appendChild(gt);
+
+    // Collapse hint when folded
+    const hint = document.createElement('span');
+    hint.className = 'xml-collapse-hint';
+    hint.textContent = ` …</${tag}>`;
+    row.appendChild(hint);
+  }
+
+  wrapper.appendChild(row);
+
+  if (hasChildren) {
+    const childrenEl = document.createElement('div');
+    childrenEl.className = 'tree-children';
+
+    kids.forEach((child, ci) => {
+      const last = ci === kids.length - 1;
+      if (child.nodeType === Node.TEXT_NODE) {
+        totalNodes++;
+        const textRow = document.createElement('div');
+        textRow.className = 'tree-row xml-row';
+        textRow.dataset.path = myPath + '.#text';
+        for (let i = 0; i <= depth; i++) {
+          const line = document.createElement('span');
+          line.className = 'tree-line' + (i === depth && last ? ' last' : '');
+          textRow.appendChild(line);
+        }
+        const sp3 = document.createElement('span'); sp3.className = 'tree-spacer'; textRow.appendChild(sp3);
+        const tv = document.createElement('span');
+        tv.className = 'xml-text-val';
+        tv.dataset.raw = child.nodeValue.trim();
+        tv.textContent = child.nodeValue.trim();
+        textRow.appendChild(tv);
+        childrenEl.appendChild(textRow);
+      } else if (child.nodeType === Node.CDATA_SECTION_NODE) {
+        totalNodes++;
+        const cdRow = document.createElement('div');
+        cdRow.className = 'tree-row xml-row';
+        cdRow.dataset.path = myPath + '.#cdata';
+        for (let i = 0; i <= depth; i++) {
+          const line = document.createElement('span');
+          line.className = 'tree-line' + (i === depth && last ? ' last' : '');
+          cdRow.appendChild(line);
+        }
+        const sp4 = document.createElement('span'); sp4.className = 'tree-spacer'; cdRow.appendChild(sp4);
+        const cdv = document.createElement('span');
+        cdv.className = 'xml-cdata'; cdv.dataset.raw = child.nodeValue;
+        cdv.textContent = '<![CDATA[' + child.nodeValue + ']]>';
+        cdRow.appendChild(cdv);
+        childrenEl.appendChild(cdRow);
+      } else {
+        const childWrap = document.createElement('div');
+        buildXMLNode(child, childWrap, depth + 1, last, myPath);
+        childrenEl.appendChild(childWrap.firstChild);
+      }
+    });
+
+    // Closing tag row
+    totalNodes++;
+    const closeRow = document.createElement('div');
+    closeRow.className = 'tree-row xml-row xml-close-row';
+    closeRow.dataset.path = myPath + '.__close';
+    for (let i = 0; i < depth; i++) {
+      const line = document.createElement('span');
+      line.className = 'tree-line' + (i === depth - 1 && isLast ? ' last' : '');
+      closeRow.appendChild(line);
+    }
+    const csp = document.createElement('span'); csp.className = 'tree-spacer'; closeRow.appendChild(csp);
+    const clt = document.createElement('span'); clt.className = 'xml-punct'; clt.textContent = '</'; closeRow.appendChild(clt);
+    const ctn = document.createElement('span'); ctn.className = 'xml-tagname'; ctn.textContent = tag; closeRow.appendChild(ctn);
+    const cgt = document.createElement('span'); cgt.className = 'xml-punct'; cgt.textContent = '>'; closeRow.appendChild(cgt);
+    childrenEl.appendChild(closeRow);
+
+    wrapper.appendChild(childrenEl);
+  }
+
+  parent.appendChild(wrapper);
+}
+
+
+/* ══════════════════════════════════════════════════════
    MODULE: Tree Renderer  (performance-optimised)
    Key changes vs previous:
    - Event delegation: ONE click listener per tree container
@@ -377,55 +671,11 @@ let totalNodes = 0;
 function renderTree(blocks, container) {
   totalNodes = 0;
   container.innerHTML = '';
-
-  // Build all DOM off-screen in a fragment
   const frag = document.createDocumentFragment();
-
-  blocks.forEach((block, bi) => {
-    if (block.caption) {
-      const cap = document.createElement('div');
-      cap.className = 'block-caption';
-      cap.textContent = block.caption;
-      frag.appendChild(cap);
-    }
-    if (block.type === 'text') {
-      if (bi < blocks.length - 1) {
-        const sep = document.createElement('div');
-        sep.className = 'block-separator';
-        frag.appendChild(sep);
-      }
-      return;
-    }
-    const header  = document.createElement('div');
-    header.className = 'block-header';
-    const typeTag = document.createElement('span');
-    typeTag.className = `block-type-tag ${block.type}`;
-    typeTag.textContent = block.type.toUpperCase();
-    const labelEl = document.createElement('span');
-    labelEl.className = 'block-label';
-    labelEl.textContent = block.label;
-    header.appendChild(typeTag);
-    header.appendChild(labelEl);
-    frag.appendChild(header);
-
-    const blockWrap = document.createElement('div');
-    blockWrap.className = 'block-wrap';
-    blockWrap.appendChild(buildNode(block.data, null, 0, true, 'root', ''));
-    frag.appendChild(blockWrap);
-
-    if (bi < blocks.length - 1) {
-      const sep = document.createElement('div');
-      sep.className = 'block-separator';
-      frag.appendChild(sep);
-    }
-  });
-
-  // Single DOM insertion
+  // buildXMLTree handles both xml and json blocks correctly
+  buildXMLTree(blocks, frag);
   container.appendChild(frag);
-
-  // Attach ONE delegated listener for all toggle clicks
   attachToggleDelegate(container);
-
   nodeCount.textContent = `${totalNodes.toLocaleString()} node${totalNodes !== 1 ? 's' : ''}`;
 }
 
@@ -457,12 +707,15 @@ function toggleNode(btn) {
   if (!treeNode) return;
   const childrenEl = treeNode.querySelector(':scope > .tree-children');
   if (!childrenEl) return;
+  const row = treeNode.querySelector(':scope > .tree-row');
   if (btn.classList.contains('expanded')) {
     btn.classList.replace('expanded', 'collapsed');
     childrenEl.classList.add('collapsed');
+    if (row) row.classList.add('has-children-collapsed');
   } else {
     btn.classList.replace('collapsed', 'expanded');
     childrenEl.classList.remove('collapsed');
+    if (row) row.classList.remove('has-children-collapsed');
   }
 }
 
@@ -636,9 +889,21 @@ function renderTextView(blocks) {
       ? `<span class="block-caption-text">${esc(b.caption)}</span>\n`
       : '';
     if (b.type === 'text') return capHtml.trimEnd();
-    const bodyHtml = state.minified
-      ? esc(JSON.stringify(b.data))
-      : syntaxHighlightJSON(JSON.stringify(b.data, null, state.indent));
+
+    let bodyHtml;
+    if (b.type === 'xml' && b.rawXml) {
+      if (state.minified) {
+        // Minify: collapse all whitespace between tags
+        bodyHtml = esc(b.rawXml.replace(/\s*(<[^>]+>)\s*/g, '$1').trim());
+      } else {
+        bodyHtml = syntaxHighlightXML(beautifyXML(b.rawXml, state.indent));
+      }
+    } else {
+      bodyHtml = state.minified
+        ? esc(JSON.stringify(b.data))
+        : syntaxHighlightJSON(JSON.stringify(b.data, null, state.indent));
+    }
+
     return capHtml +
       `<span class="block-hdr-text ${b.type}">${esc(b.label)}</span>\n` +
       bodyHtml;
@@ -1159,6 +1424,38 @@ Exported from warehouse system v3.2.
 inputArea.value = DEMO;
 charCount.textContent = `${DEMO.length.toLocaleString()} chars`;
 runParse();
+
+/* ══ THEME TOGGLE ══════════════════════════════════ */
+(function() {
+  const btn      = $('themeToggle');
+  const icon     = $('themeIcon');
+  const label    = $('themeLabel');
+  const body     = document.body;
+  const KEY      = 'datalens-theme';
+
+  function applyTheme(mode) {
+    if (mode === 'dark') {
+      body.classList.add('dark-mode');
+      icon.textContent  = '☾';
+      label.textContent = 'Dark';
+    } else {
+      body.classList.remove('dark-mode');
+      icon.textContent  = '☀';
+      label.textContent = 'Light';
+    }
+    try { localStorage.setItem(KEY, mode); } catch {}
+  }
+
+  // Restore saved preference, default to light
+  let saved = 'light';
+  try { saved = localStorage.getItem(KEY) || 'light'; } catch {}
+  applyTheme(saved);
+
+  btn.addEventListener('click', () => {
+    applyTheme(body.classList.contains('dark-mode') ? 'light' : 'dark');
+  });
+})();
+
 
 /* ══════════════════════════════════════════════════════
    COMPARE MODE
