@@ -989,6 +989,10 @@ function restoreEl(el) {
     else if (el.classList.contains('text-key'))  el.textContent = '#text';
     else if (el.classList.contains('index-key')) el.textContent = `[${raw}]`;
     else el.textContent = raw;
+  } else if (el.classList.contains('xml-attr-val')) {
+    el.textContent = `"${raw}"`;
+  } else if (el.classList.contains('xml-attr-name')) {
+    el.textContent = ' ' + raw;
   } else {
     el.textContent = raw;
   }
@@ -997,7 +1001,7 @@ function restoreEl(el) {
 function clearAllHighlights() {
   treeOutput.querySelectorAll('.tree-row.highlighted, .tree-row.search-active').forEach(row => {
     row.classList.remove('highlighted', 'search-active');
-    row.querySelectorAll('.tree-key, .tree-val').forEach(restoreEl);
+    row.querySelectorAll('.tree-key, .tree-val, .xml-tagname, .xml-attr-name, .xml-attr-val, .xml-text-val').forEach(restoreEl);
   });
 }
 
@@ -1018,7 +1022,8 @@ function applySearch(term) {
   const allRows = treeOutput.querySelectorAll('.tree-row');
   allRows.forEach(row => {
     let matched = false;
-    row.querySelectorAll('.tree-key, .tree-val').forEach(el => {
+    // Match both JSON elements (.tree-key/.tree-val) and XML elements
+    row.querySelectorAll('.tree-key, .tree-val, .xml-tagname, .xml-attr-name, .xml-attr-val, .xml-text-val').forEach(el => {
       if (injectHighlight(el, state.searchTerm)) matched = true;
     });
     if (!matched) return;
@@ -1290,17 +1295,25 @@ clearBtn.addEventListener('click', () => {
   hideError(); showEmpty(); searchInput.value = ''; matchCount.textContent = '';
 });
 
-viewTreeBtn.addEventListener('click', () => {
-  if (state.view === 'tree') return;
-  state.view = 'tree'; viewTreeBtn.classList.add('active'); viewTextBtn.classList.remove('active');
+function setView(view) {
+  if (state.view === view) return;
+  state.view = view;
+  const isTree = view === 'tree';
+  viewTreeBtn.classList.toggle('active', isTree);
+  viewTextBtn.classList.toggle('active', !isTree);
+  const ovt = $('outViewTree'), ovx = $('outViewText');
+  if (ovt) ovt.classList.toggle('active', isTree);
+  if (ovx) ovx.classList.toggle('active', !isTree);
+  expandAllBtn.style.visibility   = isTree ? '' : 'hidden';
+  collapseAllBtn.style.visibility = isTree ? '' : 'hidden';
   if (state.blocks.length) renderOutput();
-});
+}
 
-viewTextBtn.addEventListener('click', () => {
-  if (state.view === 'text') return;
-  state.view = 'text'; viewTextBtn.classList.add('active'); viewTreeBtn.classList.remove('active');
-  if (state.blocks.length) renderOutput();
-});
+viewTreeBtn.addEventListener('click', () => setView('tree'));
+viewTextBtn.addEventListener('click', () => setView('text'));
+const _ovt = $('outViewTree'), _ovx = $('outViewText');
+if (_ovt) _ovt.addEventListener('click', () => setView('tree'));
+if (_ovx) _ovx.addEventListener('click', () => setView('text'));
 
 [indent2Btn, indent4Btn].forEach(btn => {
   btn.addEventListener('click', () => {
@@ -1350,8 +1363,12 @@ searchInput.addEventListener('keydown', e => {
   }
 });
 
-$('searchNextBtn').addEventListener('click', searchNext);
-$('searchPrevBtn').addEventListener('click', searchPrev);
+$('searchNextBtn').addEventListener('click', () => {
+  if (state.view === 'tree') searchNext(); else textSearchNext();
+});
+$('searchPrevBtn').addEventListener('click', () => {
+  if (state.view === 'tree') searchPrev(); else textSearchPrev();
+});
 
 // Fullscreen output panel
 const outputPanel   = document.querySelector('.panel-output');

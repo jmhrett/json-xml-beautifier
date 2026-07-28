@@ -917,3 +917,38 @@ body.dark-mode .sx-tagname    { color: #f7768e; }
 body.dark-mode .sx-attr-name  { color: #e0af68; }
 body.dark-mode .sx-attr-val   { color: #9ece6a; }
 body.dark-mode .sx-comment    { color: #565f89; }
+
+/* ══ OUTPUT PANEL VIEW TOGGLE (Tree / Text) ══════════ */
+.out-view-group {
+  display: flex;
+  align-items: center;
+  background: var(--out-bg3);
+  border: 1px solid var(--out-border);
+  border-radius: 20px;
+  padding: 2px 4px;
+  gap: 2px;
+}
+
+.out-view-btn {
+  background: transparent;
+  border: none;
+  color: var(--out-text2);
+  font-family: var(--font-ui);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  padding: 3px 9px;
+  border-radius: 20px;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+.out-view-btn:hover  { color: var(--out-text); }
+.out-view-btn.active { background: var(--accent); color: #fff; }
+
+/* Dark mode */
+body.dark-mode .out-view-group {
+  background: var(--out-bg3);
+  border-color: var(--out-border);
+}
+body.dark-mode .out-view-btn { color: var(--out-text2); }
+body.dark-mode .out-view-btn:hover { color: var(--out-text); }

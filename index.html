@@ -77,9 +77,14 @@
             <input type="text" id="searchInput" placeholder="Search…" />
             <span class="match-count" id="matchCount"></span>
             <div class="search-nav" id="searchNav" style="display:none">
-              <button class="search-nav-btn" id="searchPrevBtn"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 12L6 8l4-4"/></svg></button>
-              <button class="search-nav-btn" id="searchNextBtn"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 4l4 4-4 4"/></svg></button>
+              <button class="search-nav-btn" id="searchPrevBtn" title="Prev (Shift+Enter)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 12L6 8l4-4"/></svg></button>
+              <button class="search-nav-btn" id="searchNextBtn" title="Next (Enter)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 4l4 4-4 4"/></svg></button>
             </div>
+          </div>
+          <!-- View toggle — visible always, including fullscreen -->
+          <div class="out-view-group" id="outViewGroup">
+            <button class="out-view-btn active" id="outViewTree">Tree</button>
+            <button class="out-view-btn" id="outViewText">Text</button>
           </div>
           <button class="icon-btn" id="expandAllBtn" title="Expand all"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 6l5 5 5-5"/><path d="M3 2h10"/><path d="M3 14h10"/></svg></button>
           <button class="icon-btn" id="collapseAllBtn" title="Collapse all"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 10l5-5 5 5"/><path d="M3 2h10"/><path d="M3 14h10"/></svg></button>
