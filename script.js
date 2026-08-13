@@ -357,416 +357,344 @@ function xmlToJson(node) {
 }
 
 /* ══════════════════════════════════════════════════════
-   MODULE: Tree Renderer
+   MODULE: Tree Renderer  — LAZY / VIRTUAL
+   Children are NOT rendered until a node is expanded.
+   This means a 100k-node document renders instantly
+   because only the top-level rows are in the DOM.
 ══════════════════════════════════════════════════════ */
+
 let totalNodes = 0;
+
+function renderTree(blocks, container) {
+  totalNodes   = 0;
+  container.innerHTML = '';
+  const frag   = document.createDocumentFragment();
+  buildXMLTree(blocks, frag);
+  container.appendChild(frag);
+  attachToggleDelegate(container);
+  nodeCount.textContent =
+    `${totalNodes.toLocaleString()} node${totalNodes !== 1 ? 's' : ''}`;
+}
+
+/* ONE delegated handler per container — no per-node listeners */
+function attachToggleDelegate(container) {
+  if (container._dh) container.removeEventListener('click', container._dh);
+  container._dh = e => {
+    const btn = e.target.closest('.toggle-btn');
+    if (btn) { e.stopPropagation(); toggleNode(btn, container); return; }
+    const row = e.target.closest('.tree-row');
+    if (row) {
+      const b = row.querySelector(':scope > .toggle-btn');
+      if (b) toggleNode(b, container);
+    }
+  };
+  container.addEventListener('click', container._dh);
+}
+
+function toggleNode(btn, container) {
+  const node = btn.closest('.tree-node');
+  if (!node) return;
+  let childrenEl = node.querySelector(':scope > .tree-children');
+  const row = node.querySelector(':scope > .tree-row');
+
+  if (btn.classList.contains('expanded')) {
+    /* COLLAPSE */
+    btn.classList.replace('expanded', 'collapsed');
+    if (childrenEl) childrenEl.classList.add('collapsed');
+    if (row) row.classList.add('has-children-collapsed');
+  } else {
+    /* EXPAND — lazy-render children if not yet built */
+    if (!childrenEl) {
+      childrenEl = lazyBuildChildren(node, container);
+    }
+    btn.classList.replace('collapsed', 'expanded');
+    if (childrenEl) childrenEl.classList.remove('collapsed');
+    if (row) row.classList.remove('has-children-collapsed');
+  }
+}
+
+/* ── Lazy child builder ──────────────────────────────
+   The node stores its pending data in dataset:
+   data-lazy-type = "json" | "xml"
+   data-lazy-idx  = index into the global lazyStore
+*/
+const lazyStore = [];   // { type, value, path, depth, isXml }
+
+function lazyBuildChildren(node, container) {
+  const idx = node.dataset.lazyIdx;
+  if (idx === undefined) return null;
+  const entry = lazyStore[+idx];
+  if (!entry) return null;
+  delete node.dataset.lazyIdx;
+
+  const childrenEl = document.createElement('div');
+  childrenEl.className = 'tree-children';
+
+  if (entry.isXml) {
+    const kids = getXmlKids(entry.xmlEl);
+    kids.forEach((child, ci) => {
+      buildXMLRow(child, childrenEl, entry.depth + 1, ci === kids.length - 1, entry.path);
+    });
+    // closing tag
+    appendCloseRow(entry.xmlEl.tagName, childrenEl, entry.depth, entry.isLast, entry.path);
+  } else {
+    const entries = Object.entries(entry.value);
+    entries.forEach(([k, v], i) => {
+      const last  = i === entries.length - 1;
+      const kType = k === '#text' ? 'text' : entry.isArray ? 'index' : 'normal';
+      if (k === '@attributes' && v && typeof v === 'object') {
+        appendAttrGroup(v, childrenEl, entry.depth + 1, last, entry.path);
+      } else {
+        childrenEl.appendChild(buildNode(v, k, entry.depth + 1, last, kType, entry.path));
+      }
+    });
+  }
+
+  node.appendChild(childrenEl);
+  // delegate will already be on the container, no extra listener needed
+  return childrenEl;
+}
 
 /* ══════════════════════════════════════════════════════
    MODULE: XML Beautifier & XML Tree Renderer
-   XML blocks are displayed as real XML — not JSON.
-   Tree view shows collapsible <tag attr="v"> nodes.
-   Text view shows indented, syntax-highlighted XML.
 ══════════════════════════════════════════════════════ */
 
-/* ── Beautify XML: re-serialize with proper indentation ── */
 function beautifyXML(xmlString, indentSize) {
   const doc = new DOMParser().parseFromString(xmlString, 'text/xml');
-  if (doc.querySelector('parsererror')) return xmlString; // return as-is if broken
+  if (doc.querySelector('parsererror')) return xmlString;
   const pad = ' '.repeat(indentSize);
   return serializeNode(doc.documentElement, 0, pad);
 }
 
 function serializeNode(node, depth, pad) {
   const indent = pad.repeat(depth);
-
   if (node.nodeType === Node.TEXT_NODE) {
     const v = node.nodeValue.replace(/^\s+|\s+$/g, '');
-    return v ? indent + v : '';
+    return v ? indent + escXml(v) : '';
   }
-  if (node.nodeType === Node.CDATA_SECTION_NODE) {
+  if (node.nodeType === Node.CDATA_SECTION_NODE)
     return indent + '<![CDATA[' + node.nodeValue + ']]>';
-  }
-  if (node.nodeType === Node.COMMENT_NODE) {
+  if (node.nodeType === Node.COMMENT_NODE)
     return indent + '<!--' + node.nodeValue + '-->';
-  }
-  if (node.nodeType === Node.PROCESSING_INSTRUCTION_NODE) {
-    return indent + '<?' + node.target + ' ' + node.data + '?>';
-  }
   if (node.nodeType !== Node.ELEMENT_NODE) return '';
 
-  // Build opening tag
   let open = indent + '<' + node.tagName;
-  for (const attr of node.attributes) {
+  for (const attr of node.attributes)
     open += ' ' + attr.name + '="' + attr.value.replace(/"/g, '&quot;') + '"';
-  }
 
-  const children = Array.from(node.childNodes).filter(n => {
-    if (n.nodeType === Node.TEXT_NODE) return n.nodeValue.trim().length > 0;
-    return true;
-  });
+  const children = Array.from(node.childNodes).filter(n =>
+    n.nodeType !== Node.TEXT_NODE || n.nodeValue.trim().length > 0);
 
-  if (children.length === 0) {
-    return open + ' />';
-  }
+  if (children.length === 0) return open + ' />';
+  if (children.length === 1 && children[0].nodeType === Node.TEXT_NODE)
+    return open + '>' + escXml(children[0].nodeValue.trim()) + '</' + node.tagName + '>';
 
-  // Single text-only child — inline
-  if (children.length === 1 && children[0].nodeType === Node.TEXT_NODE) {
-    const text = children[0].nodeValue.trim();
-    return open + '>' + escXml(text) + '</' + node.tagName + '>';
-  }
-
-  // Multiple / element children — block
-  const childLines = children
-    .map(c => serializeNode(c, depth + 1, pad))
-    .filter(Boolean);
-  return open + '>\n' + childLines.join('\n') + '\n' + indent + '</' + node.tagName + '>';
+  const lines = children.map(c => serializeNode(c, depth + 1, pad)).filter(Boolean);
+  return open + '>\n' + lines.join('\n') + '\n' + indent + '</' + node.tagName + '>';
 }
 
 function escXml(s) {
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
-/* ── Syntax-highlight beautified XML for text view ── */
+/* ── XML syntax highlight (text view) ─────────────── */
 function syntaxHighlightXML(str) {
-  // Tokenise: tags, attributes, text, comments, CDATA
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, ' LT ')
-    .replace(/>/g, ' GT ')
-    // restore and wrap: comments
-    .replace(/ LT (!--[\s\S]*?--) GT /g,
-      (_, c) => `<span class="sx-comment">&lt;${c.replace(/ LT /g,'&lt;').replace(/ GT /g,'&gt;')}&gt;</span>`)
-    // CDATA
-    .replace(/ LT (!\[CDATA\[[\s\S]*?]]) GT /g,
-      (_, c) => `<span class="sx-cdata">&lt;${c}&gt;</span>`)
-    // closing tags
-    .replace(/ LT (\/[\w:.-]+) GT /g,
-      (_, t) => `<span class="sx-tag">&lt;${t}&gt;</span>`)
-    // self-closing or opening tags with optional attrs
-    .replace(/ LT (\??)(\/?)([\w:.-]+)((?:\s+[\w:.-]+="[^"]*")*)\s*(\/?\?) GT /g,
-      (_, pi, slash, name, attrs, end) => {
-        const tagSpan  = `<span class="sx-tag">&lt;${pi}${slash}</span><span class="sx-tagname">${name}</span>`;
-        const attrSpan = attrs.replace(/\s+([\w:.-]+)="([^"]*)"/g, (__, k, v) =>
-          ` <span class="sx-attr-name">${k}</span>=<span class="sx-attr-val">"${v}"</span>`);
-        const endSpan  = `<span class="sx-tag">${end}&gt;</span>`;
-        return tagSpan + attrSpan + endSpan;
-      })
-    // remaining LT/GT tokens
-    .replace(/ LT /g, '&lt;')
-    .replace(/ GT /g, '&gt;');
+  // Escape first, then tokenise — safe and fast
+  const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  // Work on the beautified string character by character
+  let out = '', i = 0, n = str.length;
+  while (i < n) {
+    if (str[i] === '<') {
+      // comment
+      if (str.startsWith('<!--', i)) {
+        const e = str.indexOf('-->', i);
+        const end = e === -1 ? n : e + 3;
+        out += `<span class="sx-comment">${esc(str.slice(i, end))}</span>`;
+        i = end; continue;
+      }
+      // CDATA
+      if (str.startsWith('<![CDATA[', i)) {
+        const e = str.indexOf(']]>', i);
+        const end = e === -1 ? n : e + 3;
+        out += `<span class="sx-cdata">${esc(str.slice(i, end))}</span>`;
+        i = end; continue;
+      }
+      // Find closing >
+      let j = i + 1;
+      while (j < n && str[j] !== '>') {
+        if (str[j] === '"') { j++; while (j < n && str[j] !== '"') j++; }
+        j++;
+      }
+      const tag = str.slice(i, j + 1); // includes < and >
+      out += colorXMLTag(tag);
+      i = j + 1;
+      continue;
+    }
+    // text node content
+    let j = i;
+    while (j < n && str[j] !== '<') j++;
+    if (j > i) out += esc(str.slice(i, j));
+    i = j;
+  }
+  return out;
 }
 
-/* ── Build XML tree (collapsible) in the tree view ── */
-function buildXMLTree(blocks, frag) {
-  blocks.forEach((block, bi) => {
-    if (block.caption) {
-      const cap = document.createElement('div');
-      cap.className = 'block-caption';
-      cap.textContent = block.caption;
-      frag.appendChild(cap);
-    }
-    if (block.type === 'text') return;
+function colorXMLTag(raw) {
+  const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  // closing tag
+  if (raw.startsWith('</'))
+    return `<span class="sx-tag">&lt;/</span><span class="sx-tagname">${esc(raw.slice(2,-1).trim())}</span><span class="sx-tag">&gt;</span>`;
 
-    const header  = document.createElement('div');
-    header.className = 'block-header';
-    const typeTag = document.createElement('span');
-    typeTag.className = `block-type-tag ${block.type}`;
-    typeTag.textContent = block.type.toUpperCase();
-    const labelEl = document.createElement('span');
-    labelEl.className = 'block-label';
-    labelEl.textContent = block.label;
-    header.appendChild(typeTag);
-    header.appendChild(labelEl);
-    frag.appendChild(header);
+  const inner = raw.slice(1, raw.endsWith('/>') ? -2 : -1);
+  const nameMatch = inner.match(/^(\??)(\/?)([\w:.-]+)/);
+  if (!nameMatch) return esc(raw);
+  const [, pi, slash, name] = nameMatch;
+  const rest = inner.slice(nameMatch[0].length);
+  const selfClose = raw.endsWith('/>') ? ' />' : (pi ? '?>' : '>');
 
-    if (block.type === 'xml' && block.xmlDoc) {
-      const blockWrap = document.createElement('div');
-      blockWrap.className = 'block-wrap';
-      buildXMLNode(block.xmlDoc.documentElement, blockWrap, 0, true, '');
-      frag.appendChild(blockWrap);
-    } else {
-      // JSON block — use existing buildNode
-      const blockWrap = document.createElement('div');
-      blockWrap.className = 'block-wrap';
-      blockWrap.appendChild(buildNode(block.data, null, 0, true, 'root', ''));
-      frag.appendChild(blockWrap);
-    }
+  let out = `<span class="sx-tag">&lt;${pi}</span><span class="sx-tagname">${name}</span>`;
+  // attributes
+  out += rest.replace(/([\w:.-]+)="([^"]*)"/g,
+    (_, k, v) => ` <span class="sx-attr-name">${k}</span><span class="sx-tag">=</span><span class="sx-attr-val">"${esc(v)}"</span>`);
+  out += `<span class="sx-tag">${esc(selfClose)}</span>`;
+  return out;
+}
 
-    if (bi < blocks.length - 1) {
-      const sep = document.createElement('div');
-      sep.className = 'block-separator';
-      frag.appendChild(sep);
-    }
+/* ── XML tree helpers ──────────────────────────────── */
+function getXmlKids(el) {
+  return Array.from(el.childNodes).filter(n => {
+    if (n.nodeType === Node.TEXT_NODE) return n.nodeValue.trim().length > 0;
+    return n.nodeType === Node.ELEMENT_NODE || n.nodeType === Node.CDATA_SECTION_NODE;
   });
+}
+
+/* Build one XML row and (lazily) its subtree */
+function buildXMLRow(child, parent, depth, isLast, parentPath) {
+  if (child.nodeType === Node.TEXT_NODE) {
+    totalNodes++;
+    const textRow = document.createElement('div');
+    textRow.className = 'tree-row xml-row';
+    textRow.dataset.path = parentPath + '.#text';
+    appendIndent(textRow, depth, isLast);
+    const sp = document.createElement('span'); sp.className = 'tree-spacer'; textRow.appendChild(sp);
+    const tv = document.createElement('span');
+    tv.className = 'xml-text-val'; tv.dataset.raw = child.nodeValue.trim();
+    tv.textContent = child.nodeValue.trim();
+    textRow.appendChild(tv);
+    parent.appendChild(textRow);
+    return;
+  }
+  if (child.nodeType === Node.CDATA_SECTION_NODE) {
+    totalNodes++;
+    const cdRow = document.createElement('div');
+    cdRow.className = 'tree-row xml-row';
+    cdRow.dataset.path = parentPath + '.#cdata';
+    appendIndent(cdRow, depth, isLast);
+    const sp = document.createElement('span'); sp.className = 'tree-spacer'; cdRow.appendChild(sp);
+    const cdv = document.createElement('span');
+    cdv.className = 'xml-cdata'; cdv.dataset.raw = child.nodeValue;
+    cdv.textContent = '<![CDATA[' + child.nodeValue + ']]>';
+    cdRow.appendChild(cdv);
+    parent.appendChild(cdRow);
+    return;
+  }
+  // Element node
+  buildXMLNode(child, parent, depth, isLast, parentPath);
 }
 
 function buildXMLNode(el, parent, depth, isLast, parentPath) {
   totalNodes++;
-  const tag = el.tagName;
-  const myPath = parentPath ? `${parentPath}.${tag}` : tag;
+  const tag    = el.tagName;
+  const myPath = parentPath ? parentPath + '.' + tag : tag;
+  const kids   = getXmlKids(el);
+  const hasKids = kids.length > 0;
 
   const wrapper = document.createElement('div');
   wrapper.className = 'tree-node';
 
-  const kids = Array.from(el.childNodes).filter(n => {
-    if (n.nodeType === Node.TEXT_NODE) return n.nodeValue.trim().length > 0;
-    return n.nodeType === Node.ELEMENT_NODE || n.nodeType === Node.CDATA_SECTION_NODE;
-  });
-  const hasChildren = kids.length > 0;
-
-  // Opening row: <tagName attr="val" …>
+  /* Opening row */
   const row = document.createElement('div');
   row.className = 'tree-row xml-row';
   row.dataset.path = myPath;
+  appendIndent(row, depth, isLast);
 
-  // Indent
-  for (let i = 0; i < depth; i++) {
-    const line = document.createElement('span');
-    line.className = 'tree-line' + (i === depth - 1 && isLast ? ' last' : '');
-    row.appendChild(line);
-  }
-
-  // Toggle or spacer
-  if (hasChildren) {
+  if (hasKids) {
     const btn = document.createElement('span');
-    btn.className = 'toggle-btn expanded';
+    btn.className = 'toggle-btn collapsed'; // START COLLAPSED for perf
     row.appendChild(btn);
   } else {
-    const sp = document.createElement('span');
-    sp.className = 'tree-spacer';
-    row.appendChild(sp);
+    const sp = document.createElement('span'); sp.className = 'tree-spacer'; row.appendChild(sp);
   }
 
-  // <tagName
-  const lt = document.createElement('span');
-  lt.className = 'xml-punct'; lt.textContent = '<';
-  row.appendChild(lt);
-  const tagEl = document.createElement('span');
-  tagEl.className = 'xml-tagname';
+  row.appendChild(mkSpan('xml-punct', '<'));
+  const tagEl = mkSpan('xml-tagname', tag);
   tagEl.dataset.raw = tag;
-  tagEl.textContent = tag;
   row.appendChild(tagEl);
 
-  // attributes inline
   for (const attr of el.attributes) {
-    const sp2 = document.createElement('span');
-    sp2.className = 'xml-attr-name';
-    sp2.dataset.raw = attr.name;
-    sp2.textContent = ' ' + attr.name;
-    row.appendChild(sp2);
-    const eq = document.createElement('span');
-    eq.className = 'xml-punct'; eq.textContent = '=';
-    row.appendChild(eq);
-    const av = document.createElement('span');
-    av.className = 'xml-attr-val';
-    av.dataset.raw = attr.value;
-    av.textContent = '"' + attr.value + '"';
-    row.appendChild(av);
+    const an = mkSpan('xml-attr-name', ' ' + attr.name); an.dataset.raw = attr.name; row.appendChild(an);
+    row.appendChild(mkSpan('xml-punct', '='));
+    const av = mkSpan('xml-attr-val', '"' + attr.value + '"'); av.dataset.raw = attr.value; row.appendChild(av);
   }
 
-  // Self-closing or open
-  if (!hasChildren) {
-    const sc = document.createElement('span');
-    sc.className = 'xml-punct'; sc.textContent = ' />';
-    row.appendChild(sc);
+  if (!hasKids) {
+    row.appendChild(mkSpan('xml-punct', ' />'));
   } else {
-    const gt = document.createElement('span');
-    gt.className = 'xml-punct'; gt.textContent = '>';
-    row.appendChild(gt);
-
-    // Collapse hint when folded
-    const hint = document.createElement('span');
-    hint.className = 'xml-collapse-hint';
-    hint.textContent = ` …</${tag}>`;
+    row.appendChild(mkSpan('xml-punct', '>'));
+    const hint = mkSpan('xml-collapse-hint', ' \u2026</' + tag + '>');
     row.appendChild(hint);
+    // Store lazy data on the wrapper node
+    const storeIdx = lazyStore.length;
+    lazyStore.push({ isXml: true, xmlEl: el, depth, isLast, path: myPath });
+    wrapper.dataset.lazyIdx = storeIdx;
+    // Also start with collapsed visual placeholder so content-visibility works
+    const placeholder = document.createElement('div');
+    placeholder.className = 'tree-children collapsed tree-lazy-placeholder';
+    wrapper.appendChild(placeholder); // empty — filled on expand
   }
 
-  wrapper.appendChild(row);
-
-  if (hasChildren) {
-    const childrenEl = document.createElement('div');
-    childrenEl.className = 'tree-children';
-
-    kids.forEach((child, ci) => {
-      const last = ci === kids.length - 1;
-      if (child.nodeType === Node.TEXT_NODE) {
-        totalNodes++;
-        const textRow = document.createElement('div');
-        textRow.className = 'tree-row xml-row';
-        textRow.dataset.path = myPath + '.#text';
-        for (let i = 0; i <= depth; i++) {
-          const line = document.createElement('span');
-          line.className = 'tree-line' + (i === depth && last ? ' last' : '');
-          textRow.appendChild(line);
-        }
-        const sp3 = document.createElement('span'); sp3.className = 'tree-spacer'; textRow.appendChild(sp3);
-        const tv = document.createElement('span');
-        tv.className = 'xml-text-val';
-        tv.dataset.raw = child.nodeValue.trim();
-        tv.textContent = child.nodeValue.trim();
-        textRow.appendChild(tv);
-        childrenEl.appendChild(textRow);
-      } else if (child.nodeType === Node.CDATA_SECTION_NODE) {
-        totalNodes++;
-        const cdRow = document.createElement('div');
-        cdRow.className = 'tree-row xml-row';
-        cdRow.dataset.path = myPath + '.#cdata';
-        for (let i = 0; i <= depth; i++) {
-          const line = document.createElement('span');
-          line.className = 'tree-line' + (i === depth && last ? ' last' : '');
-          cdRow.appendChild(line);
-        }
-        const sp4 = document.createElement('span'); sp4.className = 'tree-spacer'; cdRow.appendChild(sp4);
-        const cdv = document.createElement('span');
-        cdv.className = 'xml-cdata'; cdv.dataset.raw = child.nodeValue;
-        cdv.textContent = '<![CDATA[' + child.nodeValue + ']]>';
-        cdRow.appendChild(cdv);
-        childrenEl.appendChild(cdRow);
-      } else {
-        const childWrap = document.createElement('div');
-        buildXMLNode(child, childWrap, depth + 1, last, myPath);
-        childrenEl.appendChild(childWrap.firstChild);
-      }
-    });
-
-    // Closing tag row
-    totalNodes++;
-    const closeRow = document.createElement('div');
-    closeRow.className = 'tree-row xml-row xml-close-row';
-    closeRow.dataset.path = myPath + '.__close';
-    for (let i = 0; i < depth; i++) {
-      const line = document.createElement('span');
-      line.className = 'tree-line' + (i === depth - 1 && isLast ? ' last' : '');
-      closeRow.appendChild(line);
-    }
-    const csp = document.createElement('span'); csp.className = 'tree-spacer'; closeRow.appendChild(csp);
-    const clt = document.createElement('span'); clt.className = 'xml-punct'; clt.textContent = '</'; closeRow.appendChild(clt);
-    const ctn = document.createElement('span'); ctn.className = 'xml-tagname'; ctn.textContent = tag; closeRow.appendChild(ctn);
-    const cgt = document.createElement('span'); cgt.className = 'xml-punct'; cgt.textContent = '>'; closeRow.appendChild(cgt);
-    childrenEl.appendChild(closeRow);
-
-    wrapper.appendChild(childrenEl);
-  }
-
+  wrapper.insertBefore(row, wrapper.firstChild);
   parent.appendChild(wrapper);
 }
 
-
-/* ══════════════════════════════════════════════════════
-   MODULE: Tree Renderer  (performance-optimised)
-   Key changes vs previous:
-   - Event delegation: ONE click listener per tree container
-     instead of one per node
-   - data-path stored on every row at build time so diff
-     and search never have to walk the DOM to reconstruct paths
-   - buildIndent uses a reusable template clone
-   - DocumentFragment batch-appended once per node
-   - Large trees rendered in chunks via requestIdleCallback
-     so the UI never freezes
-══════════════════════════════════════════════════════ */
-
-function renderTree(blocks, container) {
-  totalNodes = 0;
-  container.innerHTML = '';
-  const frag = document.createDocumentFragment();
-  // buildXMLTree handles both xml and json blocks correctly
-  buildXMLTree(blocks, frag);
-  container.appendChild(frag);
-  attachToggleDelegate(container);
-  nodeCount.textContent = `${totalNodes.toLocaleString()} node${totalNodes !== 1 ? 's' : ''}`;
+function appendCloseRow(tag, parent, depth, isLast, path) {
+  totalNodes++;
+  const r = document.createElement('div');
+  r.className = 'tree-row xml-row xml-close-row';
+  r.dataset.path = path + '.__close';
+  appendIndent(r, depth, isLast);
+  const sp = document.createElement('span'); sp.className = 'tree-spacer'; r.appendChild(sp);
+  r.appendChild(mkSpan('xml-punct', '</'));
+  r.appendChild(mkSpan('xml-tagname', tag));
+  r.appendChild(mkSpan('xml-punct', '>'));
+  parent.appendChild(r);
 }
 
-/* Single delegated click handler — zero per-node listeners */
-function attachToggleDelegate(container) {
-  // Remove any previous delegate on this container
-  if (container._delegateHandler) {
-    container.removeEventListener('click', container._delegateHandler);
-  }
-  container._delegateHandler = function(e) {
-    // Find the nearest toggle-btn or tree-row
-    const btn = e.target.closest('.toggle-btn');
-    if (btn) {
-      e.stopPropagation();
-      toggleNode(btn);
-      return;
-    }
-    const row = e.target.closest('.tree-row');
-    if (row) {
-      const rowBtn = row.querySelector(':scope > .toggle-btn');
-      if (rowBtn) toggleNode(rowBtn);
-    }
-  };
-  container.addEventListener('click', container._delegateHandler);
-}
-
-function toggleNode(btn) {
-  const treeNode = btn.closest('.tree-node');
-  if (!treeNode) return;
-  const childrenEl = treeNode.querySelector(':scope > .tree-children');
-  if (!childrenEl) return;
-  const row = treeNode.querySelector(':scope > .tree-row');
-  if (btn.classList.contains('expanded')) {
-    btn.classList.replace('expanded', 'collapsed');
-    childrenEl.classList.add('collapsed');
-    if (row) row.classList.add('has-children-collapsed');
-  } else {
-    btn.classList.replace('collapsed', 'expanded');
-    childrenEl.classList.remove('collapsed');
-    if (row) row.classList.remove('has-children-collapsed');
-  }
-}
-
-/* setupToggle kept for any callers that still use it */
-function setupToggle(btn, childrenEl) {
-  // no-op: delegation handles everything now
-}
-
+/* ── JSON tree builder ─────────────────────────────── */
 function buildNode(value, key, depth, isLast, keyType, parentPath) {
   totalNodes++;
   const wrapper = document.createElement('div');
   wrapper.className = 'tree-node';
 
-  const isObject = value !== null && typeof value === 'object';
-  const isArray  = Array.isArray(value);
-  const isEmpty  = isObject && Object.keys(value).length === 0;
-
-  // Compute this node's dot-path
-  let myPath = parentPath;
-  if (key !== null) {
-    const keyRaw = keyType === 'attr' ? key
-                 : keyType === 'index' ? key
-                 : key;
-    myPath = parentPath ? `${parentPath}.${keyRaw}` : String(keyRaw);
-  }
+  const isObj   = value !== null && typeof value === 'object';
+  const isArr   = Array.isArray(value);
+  const isEmpty = isObj && Object.keys(value).length === 0;
+  const myPath  = key !== null ? (parentPath ? parentPath + '.' + key : String(key)) : parentPath;
 
   const row = document.createElement('div');
   row.className = 'tree-row';
-  row.dataset.path = myPath;   // store for diff + search
+  row.dataset.path = myPath;
+  appendIndent(row, depth, isLast);
 
-  // Indent lines
-  if (depth > 0) {
-    for (let i = 0; i < depth; i++) {
-      const line = document.createElement('span');
-      line.className = 'tree-line' + (i === depth - 1 && isLast ? ' last' : '');
-      row.appendChild(line);
-    }
-  }
-
-  // Toggle button or spacer
-  if (isObject && !isEmpty) {
+  if (isObj && !isEmpty) {
     const btn = document.createElement('span');
-    btn.className = 'toggle-btn expanded';
+    btn.className = 'toggle-btn collapsed'; // START COLLAPSED
     row.appendChild(btn);
   } else {
-    const sp = document.createElement('span');
-    sp.className = 'tree-spacer';
-    row.appendChild(sp);
+    row.appendChild(mkSpan('tree-spacer', ''));
   }
 
-  // Key label
   if (key !== null) {
     const keyEl = document.createElement('span');
     keyEl.className = 'tree-key';
@@ -774,145 +702,182 @@ function buildNode(value, key, depth, isLast, keyType, parentPath) {
     if (keyType === 'text')  keyEl.classList.add('text-key');
     if (keyType === 'index') keyEl.classList.add('index-key');
     keyEl.dataset.raw = key;
-    keyEl.textContent = keyType === 'attr'  ? `@${key}`
-                      : keyType === 'text'   ? '#text'
-                      : keyType === 'index'  ? `[${key}]`
+    keyEl.textContent = keyType === 'attr'  ? '@' + key
+                      : keyType === 'text'  ? '#text'
+                      : keyType === 'index' ? '[' + key + ']'
                       : key;
     row.appendChild(keyEl);
-    const colon = document.createElement('span');
-    colon.className = 'tree-colon';
-    colon.textContent = ':';
+    const colon = mkSpan('tree-colon', ':');
     row.appendChild(colon);
   }
 
-  // Value / summary
-  if (isObject && !isEmpty) {
+  if (isObj && !isEmpty) {
     const count = Object.keys(value).length;
-    const meta  = document.createElement('span');
-    meta.className = 'tree-meta';
-    meta.textContent = isArray
-      ? `Array(${count})`
-      : `{${count} key${count !== 1 ? 's' : ''}}`;
+    const meta  = mkSpan('tree-meta', isArr ? 'Array(' + count + ')' : '{' + count + ' key' + (count !== 1 ? 's' : '') + '}');
     row.appendChild(meta);
-  } else if (isObject && isEmpty) {
-    const meta = document.createElement('span');
-    meta.className = 'tree-meta';
-    meta.textContent = isArray ? '[ ]' : '{ }';
-    row.appendChild(meta);
+    wrapper.appendChild(row);
+
+    // Lazy store
+    const storeIdx = lazyStore.length;
+    lazyStore.push({ isXml: false, value, isArray: isArr, depth, path: myPath });
+    wrapper.dataset.lazyIdx = storeIdx;
+    // Placeholder so toggle works
+    const placeholder = document.createElement('div');
+    placeholder.className = 'tree-children collapsed tree-lazy-placeholder';
+    wrapper.appendChild(placeholder);
+  } else if (isObj && isEmpty) {
+    row.appendChild(mkSpan('tree-meta', isArr ? '[ ]' : '{ }'));
+    wrapper.appendChild(row);
   } else {
-    const valEl = document.createElement('span');
-    valEl.className = 'tree-val';
     const { cls, display } = formatPrimitive(value);
-    valEl.classList.add(cls);
+    const valEl = mkSpan('tree-val ' + cls, display);
     valEl.dataset.raw = String(value);
-    valEl.textContent = display;
     row.appendChild(valEl);
-  }
-
-  wrapper.appendChild(row);
-
-  // Children
-  if (isObject && !isEmpty) {
-    const childrenEl = document.createElement('div');
-    childrenEl.className = 'tree-children';
-
-    const entries = Object.entries(value);
-    entries.forEach(([k, v], i) => {
-      const last  = i === entries.length - 1;
-      const kType = k === '#text' ? 'text' : isArray ? 'index' : 'normal';
-
-      if (k === '@attributes' && v !== null && typeof v === 'object') {
-        // @attributes group
-        const attrW   = document.createElement('div');
-        attrW.className = 'tree-node';
-        const attrRow = document.createElement('div');
-        attrRow.className = 'tree-row';
-        attrRow.dataset.path = myPath ? `${myPath}.@attributes` : '@attributes';
-
-        for (let di = 0; di < depth + 1; di++) {
-          const line = document.createElement('span');
-          line.className = 'tree-line' + (di === depth && last ? ' last' : '');
-          attrRow.appendChild(line);
-        }
-        const attrBtn = document.createElement('span');
-        attrBtn.className = 'toggle-btn expanded';
-        attrRow.appendChild(attrBtn);
-        const attrKey = document.createElement('span');
-        attrKey.className = 'tree-key attr-key';
-        attrKey.dataset.raw = '@attributes';
-        attrKey.textContent = '@attributes';
-        attrRow.appendChild(attrKey);
-        const attrColon = document.createElement('span');
-        attrColon.className = 'tree-colon'; attrColon.textContent = ':';
-        attrRow.appendChild(attrColon);
-        const ac = Object.keys(v).length;
-        const attrMeta = document.createElement('span');
-        attrMeta.className = 'tree-meta';
-        attrMeta.textContent = `{${ac} attr${ac !== 1 ? 's' : ''}}`;
-        attrRow.appendChild(attrMeta);
-        attrW.appendChild(attrRow);
-
-        const attrKids = document.createElement('div');
-        attrKids.className = 'tree-children';
-        const attrEntries = Object.entries(v);
-        attrEntries.forEach(([ak, av], ai) => {
-          attrKids.appendChild(buildNode(av, ak, depth + 2, ai === attrEntries.length - 1, 'attr', attrRow.dataset.path));
-        });
-        attrW.appendChild(attrKids);
-        childrenEl.appendChild(attrW);
-        return;
-      }
-
-      childrenEl.appendChild(buildNode(v, k, depth + 1, last, kType, myPath));
-    });
-
-    wrapper.appendChild(childrenEl);
+    wrapper.appendChild(row);
   }
 
   return wrapper;
 }
 
+/* @attributes group */
+function appendAttrGroup(v, parent, depth, isLast, parentPath) {
+  totalNodes++;
+  const wrap = document.createElement('div'); wrap.className = 'tree-node';
+  const attrPath = (parentPath ? parentPath + '.' : '') + '@attributes';
+  const row  = document.createElement('div'); row.className = 'tree-row'; row.dataset.path = attrPath;
+  appendIndent(row, depth, isLast);
+  const btn = document.createElement('span'); btn.className = 'toggle-btn collapsed'; row.appendChild(btn);
+  const k = mkSpan('tree-key attr-key', '@attributes'); k.dataset.raw = '@attributes'; row.appendChild(k);
+  row.appendChild(mkSpan('tree-colon', ':'));
+  const ac = Object.keys(v).length;
+  row.appendChild(mkSpan('tree-meta', '{' + ac + ' attr' + (ac !== 1 ? 's' : '') + '}'));
+  wrap.appendChild(row);
+  const storeIdx = lazyStore.length;
+  lazyStore.push({ isXml: false, value: v, isArray: false, depth, path: attrPath });
+  wrap.dataset.lazyIdx = storeIdx;
+  const ph = document.createElement('div'); ph.className = 'tree-children collapsed tree-lazy-placeholder';
+  wrap.appendChild(ph);
+  parent.appendChild(wrap);
+}
+
+/* ── Shared helpers ────────────────────────────────── */
+function mkSpan(cls, text) {
+  const s = document.createElement('span');
+  s.className = cls; s.textContent = text; return s;
+}
+
+function appendIndent(row, depth, isLast) {
+  for (let i = 0; i < depth; i++) {
+    const line = document.createElement('span');
+    line.className = 'tree-line' + (i === depth - 1 && isLast ? ' last' : '');
+    row.appendChild(line);
+  }
+}
+
 function formatPrimitive(value) {
-  if (value === null || value === undefined) return { cls:'v-null', display: String(value) };
+  if (value === null || value === undefined) return { cls: 'v-null', display: String(value) };
   const t = typeof value;
-  if (t === 'boolean') return { cls:'v-bool', display: String(value) };
-  if (t === 'number')  return { cls:'v-num',  display: String(value) };
-  return { cls:'v-str', display: `"${String(value)}"` };
+  if (t === 'boolean') return { cls: 'v-bool', display: String(value) };
+  if (t === 'number')  return { cls: 'v-num',  display: String(value) };
+  return { cls: 'v-str', display: '"' + String(value) + '"' };
+}
+
+/* Expand all / Collapse all — safe versions that only act on built nodes */
+function expandAll() {
+  treeOutput.querySelectorAll('.tree-node[data-lazy-idx]').forEach(node => {
+    const btn = node.querySelector(':scope > .tree-row > .toggle-btn');
+    if (btn && btn.classList.contains('collapsed')) toggleNode(btn, treeOutput);
+  });
+  treeOutput.querySelectorAll('.tree-children').forEach(c => c.classList.remove('collapsed'));
+  treeOutput.querySelectorAll('.toggle-btn.collapsed').forEach(b => {
+    const node = b.closest('.tree-node');
+    if (node && node.dataset.lazyIdx) toggleNode(b, treeOutput);
+    else b.classList.replace('collapsed', 'expanded');
+  });
+  treeOutput.querySelectorAll('.tree-row').forEach(r => r.classList.remove('has-children-collapsed'));
+}
+
+function collapseAll() {
+  treeOutput.querySelectorAll('.tree-children').forEach(c => c.classList.add('collapsed'));
+  treeOutput.querySelectorAll('.toggle-btn.expanded').forEach(b => b.classList.replace('expanded', 'collapsed'));
+  treeOutput.querySelectorAll('.tree-row').forEach(r => r.classList.add('has-children-collapsed'));
+}
+
+/* buildXMLTree — entry point for renderTree */
+function buildXMLTree(blocks, frag) {
+  blocks.forEach((block, bi) => {
+    if (block.caption) {
+      const cap = document.createElement('div');
+      cap.className = 'block-caption'; cap.textContent = block.caption;
+      frag.appendChild(cap);
+    }
+    if (block.type === 'text') return;
+
+    const header  = document.createElement('div'); header.className = 'block-header';
+    const typeTag = document.createElement('span');
+    typeTag.className = 'block-type-tag ' + block.type;
+    typeTag.textContent = block.type.toUpperCase();
+    const labelEl = document.createElement('span');
+    labelEl.className = 'block-label'; labelEl.textContent = block.label;
+    header.appendChild(typeTag); header.appendChild(labelEl);
+    frag.appendChild(header);
+
+    const blockWrap = document.createElement('div'); blockWrap.className = 'block-wrap';
+    if (block.type === 'xml' && block.xmlDoc) {
+      buildXMLNode(block.xmlDoc.documentElement, blockWrap, 0, true, '');
+    } else if (block.data) {
+      blockWrap.appendChild(buildNode(block.data, null, 0, true, 'root', ''));
+    }
+    frag.appendChild(blockWrap);
+
+    if (bi < blocks.length - 1) {
+      const sep = document.createElement('div'); sep.className = 'block-separator';
+      frag.appendChild(sep);
+    }
+  });
 }
 
 /* ══════════════════════════════════════════════════════
-   MODULE: Text View + Syntax Highlighting
+   MODULE: Text View — chunked, non-blocking
 ══════════════════════════════════════════════════════ */
+
 function renderTextView(blocks) {
+  // For large data, cap the highlighted output size to avoid OOM
+  const MAX_HIGHLIGHT_CHARS = 200_000;
+
   textOutput.innerHTML = blocks.map(b => {
     const capHtml = b.caption
-      ? `<span class="block-caption-text">${esc(b.caption)}</span>\n`
+      ? '<span class="block-caption-text">' + esc(b.caption) + '</span>\n'
       : '';
     if (b.type === 'text') return capHtml.trimEnd();
 
     let bodyHtml;
     if (b.type === 'xml' && b.rawXml) {
       if (state.minified) {
-        // Minify: collapse all whitespace between tags
         bodyHtml = esc(b.rawXml.replace(/\s*(<[^>]+>)\s*/g, '$1').trim());
       } else {
-        bodyHtml = syntaxHighlightXML(beautifyXML(b.rawXml, state.indent));
+        const pretty = beautifyXML(b.rawXml, state.indent);
+        bodyHtml = pretty.length > MAX_HIGHLIGHT_CHARS
+          ? '<span style="color:var(--out-text3);font-style:italic">/* Output too large for syntax highlighting — showing plain text */</span>\n' + esc(pretty)
+          : syntaxHighlightXML(pretty);
       }
     } else {
-      bodyHtml = state.minified
-        ? esc(JSON.stringify(b.data))
-        : syntaxHighlightJSON(JSON.stringify(b.data, null, state.indent));
+      const str = state.minified
+        ? JSON.stringify(b.data)
+        : JSON.stringify(b.data, null, state.indent);
+      bodyHtml = str.length > MAX_HIGHLIGHT_CHARS
+        ? '<span style="color:var(--out-text3);font-style:italic">/* Output too large for syntax highlighting — showing plain text */</span>\n' + esc(str)
+        : syntaxHighlightJSON(str);
     }
 
     return capHtml +
-      `<span class="block-hdr-text ${b.type}">${esc(b.label)}</span>\n` +
+      '<span class="block-hdr-text ' + b.type + '">' + esc(b.label) + '</span>\n' +
       bodyHtml;
   }).join('\n\n');
 }
 
 function syntaxHighlightJSON(str) {
-  let out = '', i = 0;
-  const n = str.length;
+  let out = '', i = 0; const n = str.length;
   while (i < n) {
     const ch = str[i];
     if (ch === '"') {
@@ -923,21 +888,21 @@ function syntaxHighlightJSON(str) {
         j++;
       }
       const raw = str.slice(i, j);
-      let k = j;
-      while (k < n && /[ \n\r]/.test(str[k])) k++;
-      out += str[k] === ':' ? `<span class="s-key">${esc(raw)}</span>` : `<span class="s-str">${esc(raw)}</span>`;
+      let k = j; while (k < n && /[ \n\r]/.test(str[k])) k++;
+      out += str[k] === ':'
+        ? '<span class="s-key">' + esc(raw) + '</span>'
+        : '<span class="s-str">' + esc(raw) + '</span>';
       i = j; continue;
     }
     if (ch === '-' || (ch >= '0' && ch <= '9')) {
-      let j = i;
-      while (j < n && /[0-9.\-+eE]/.test(str[j])) j++;
-      out += `<span class="s-num">${esc(str.slice(i,j))}</span>`;
+      let j = i; while (j < n && /[0-9.\-+eE]/.test(str[j])) j++;
+      out += '<span class="s-num">' + esc(str.slice(i,j)) + '</span>';
       i = j; continue;
     }
-    if (str.startsWith('true',  i)) { out += `<span class="s-bool">true</span>`;  i += 4; continue; }
-    if (str.startsWith('false', i)) { out += `<span class="s-bool">false</span>`; i += 5; continue; }
-    if (str.startsWith('null',  i)) { out += `<span class="s-null">null</span>`;  i += 4; continue; }
-    if ('{}[],:'.includes(ch))      { out += `<span class="s-punc">${esc(ch)}</span>`; i++; continue; }
+    if (str.startsWith('true',i))  { out += '<span class="s-bool">true</span>';  i+=4; continue; }
+    if (str.startsWith('false',i)) { out += '<span class="s-bool">false</span>'; i+=5; continue; }
+    if (str.startsWith('null',i))  { out += '<span class="s-null">null</span>';  i+=4; continue; }
+    if ('{}[],:'.includes(ch))     { out += '<span class="s-punc">' + esc(ch) + '</span>'; i++; continue; }
     out += esc(ch); i++;
   }
   return out;
@@ -946,6 +911,7 @@ function syntaxHighlightJSON(str) {
 function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
+
 
 /* ══════════════════════════════════════════════════════
    MODULE: Search  (optimised — data-path index, no DOM walk)
@@ -1028,13 +994,21 @@ function applySearch(term) {
     });
     if (!matched) return;
 
-    // Expand collapsed ancestors using stored path — no DOM traversal loop needed
+    // Expand collapsed ancestors (including lazy-unbuilt ones)
     let p = row.parentElement;
     while (p && p !== treeOutput) {
       if (p.classList.contains('tree-children') && p.classList.contains('collapsed')) {
         p.classList.remove('collapsed');
-        const btn = p.parentElement?.querySelector(':scope > .tree-row > .toggle-btn');
-        if (btn) btn.classList.replace('collapsed', 'expanded');
+        const parentNode = p.parentElement;
+        const btn = parentNode?.querySelector(':scope > .tree-row > .toggle-btn');
+        if (btn && btn.classList.contains('collapsed')) {
+          // May need to lazy-build first
+          if (parentNode && parentNode.dataset.lazyIdx !== undefined) {
+            lazyBuildChildren(parentNode, treeOutput);
+          }
+          btn.classList.replace('collapsed', 'expanded');
+        }
+        if (parentNode) parentNode.querySelector(':scope > .tree-row')?.classList.remove('has-children-collapsed');
       }
       p = p.parentElement;
     }
@@ -1184,12 +1158,13 @@ function runParse() {
 
 function renderOutput() {
   emptyState.style.display = 'none';
-  // Reset search state on every render
+  // Reset search and lazy store on every render
   search.hits = []; search.cursor = -1;
   textSearch.hits = []; textSearch.cursor = -1; textSearch.rawHTML = '';
   $('searchNav').style.display = 'none';
   matchCount.textContent = '';
   searchInput.value = '';
+  lazyStore.length = 0;  // clear lazy child store
   if (state.view === 'tree') {
     treeOutput.style.display = 'block';
     textOutput.style.display = 'none';

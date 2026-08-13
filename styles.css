@@ -952,3 +952,5 @@ body.dark-mode .out-view-group {
 }
 body.dark-mode .out-view-btn { color: var(--out-text2); }
 body.dark-mode .out-view-btn:hover { color: var(--out-text); }
+
+.tree-lazy-placeholder { display: none; }
