@@ -1,8 +1,16 @@
+/* DataLens v1.0.0 */
 /* ═══════════════════════════════════════════════════════
    DataLens — JSON & XML Inspector  (resilient multi-block)
    ═══════════════════════════════════════════════════════ */
 
 'use strict';
+
+/* ── App version (update this on every release) ─────── */
+const APP_VERSION = 'v1.0.0';
+document.addEventListener('DOMContentLoaded', () => {
+  const badge = document.getElementById('versionBadge');
+  if (badge) badge.textContent = APP_VERSION;
+});
 
 /* ── State ─────────────────────────────────────────── */
 const state = {
