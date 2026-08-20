@@ -1,4 +1,4 @@
-/* DataLens v1.0.0 */
+/* DataLens v1.0.1 */
 /* ═══════════════════════════════════════════════════════
    DataLens — JSON & XML Inspector  (resilient multi-block)
    ═══════════════════════════════════════════════════════ */
@@ -6,7 +6,7 @@
 'use strict';
 
 /* ── App version (update this on every release) ─────── */
-const APP_VERSION = 'v1.0.0';
+const APP_VERSION = 'v1.0.1';
 document.addEventListener('DOMContentLoaded', () => {
   const badge = document.getElementById('versionBadge');
   if (badge) badge.textContent = APP_VERSION;
@@ -376,12 +376,17 @@ let totalNodes = 0;
 function renderTree(blocks, container) {
   totalNodes   = 0;
   container.innerHTML = '';
-  const frag   = document.createDocumentFragment();
+  // Each container gets its own lazy store so compare slots don't clobber each other
+  container._lazyStore = [];
+  lazyStore = container._lazyStore;
+  const frag = document.createDocumentFragment();
   buildXMLTree(blocks, frag);
   container.appendChild(frag);
   attachToggleDelegate(container);
-  nodeCount.textContent =
-    `${totalNodes.toLocaleString()} node${totalNodes !== 1 ? 's' : ''}`;
+  if (container === treeOutput) {
+    nodeCount.textContent =
+      `${totalNodes.toLocaleString()} node${totalNodes !== 1 ? 's' : ''}`;
+  }
 }
 
 /* ONE delegated handler per container — no per-node listeners */
@@ -402,8 +407,8 @@ function attachToggleDelegate(container) {
 function toggleNode(btn, container) {
   const node = btn.closest('.tree-node');
   if (!node) return;
-  let childrenEl = node.querySelector(':scope > .tree-children');
   const row = node.querySelector(':scope > .tree-row');
+  let childrenEl = node.querySelector(':scope > .tree-children');
 
   if (btn.classList.contains('expanded')) {
     /* COLLAPSE */
@@ -411,8 +416,12 @@ function toggleNode(btn, container) {
     if (childrenEl) childrenEl.classList.add('collapsed');
     if (row) row.classList.add('has-children-collapsed');
   } else {
-    /* EXPAND — lazy-render children if not yet built */
-    if (!childrenEl) {
+    /* EXPAND */
+    // If children haven't been built yet (only placeholder exists), build now
+    const isPlaceholder = childrenEl && childrenEl.classList.contains('tree-lazy-placeholder');
+    if (isPlaceholder || !childrenEl) {
+      // Remove the empty placeholder before building real children
+      if (isPlaceholder) childrenEl.remove();
       childrenEl = lazyBuildChildren(node, container);
     }
     btn.classList.replace('collapsed', 'expanded');
@@ -426,14 +435,21 @@ function toggleNode(btn, container) {
    data-lazy-type = "json" | "xml"
    data-lazy-idx  = index into the global lazyStore
 */
-const lazyStore = [];   // { type, value, path, depth, isXml }
+// Per-container lazy store — stored directly on the container element as _lazyStore
+// This means compare mode slot A and slot B never share state
+let lazyStore = [];  // points to the active container's store during build
 
 function lazyBuildChildren(node, container) {
   const idx = node.dataset.lazyIdx;
   if (idx === undefined) return null;
-  const entry = lazyStore[+idx];
+  // Read from this container's own store, not the global pointer
+  const store = container._lazyStore || [];
+  const entry = store[+idx];
   if (!entry) return null;
   delete node.dataset.lazyIdx;
+
+  // Point lazyStore at this container for any nested buildNode calls
+  lazyStore = store;
 
   const childrenEl = document.createElement('div');
   childrenEl.className = 'tree-children';
@@ -443,7 +459,6 @@ function lazyBuildChildren(node, container) {
     kids.forEach((child, ci) => {
       buildXMLRow(child, childrenEl, entry.depth + 1, ci === kids.length - 1, entry.path);
     });
-    // closing tag
     appendCloseRow(entry.xmlEl.tagName, childrenEl, entry.depth, entry.isLast, entry.path);
   } else {
     const entries = Object.entries(entry.value);
@@ -459,7 +474,6 @@ function lazyBuildChildren(node, container) {
   }
 
   node.appendChild(childrenEl);
-  // delegate will already be on the container, no extra listener needed
   return childrenEl;
 }
 
@@ -1172,7 +1186,7 @@ function renderOutput() {
   $('searchNav').style.display = 'none';
   matchCount.textContent = '';
   searchInput.value = '';
-  lazyStore.length = 0;  // clear lazy child store
+  lazyStore = [];  // reset lazy pointer; renderTree will set it per-container
   if (state.view === 'tree') {
     treeOutput.style.display = 'block';
     textOutput.style.display = 'none';
