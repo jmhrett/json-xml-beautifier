@@ -1,4 +1,4 @@
-/* DataLens v1.0.1 */
+/* DataLens v1.0.3 */
 /* ═══════════════════════════════════════════════════════
    DataLens — Clean Viewer Theme
    Inspired by browser XML/JSON viewers:
@@ -976,3 +976,14 @@ body.dark-mode .out-view-btn:hover { color: var(--out-text); }
   border-color: var(--accent);
   cursor: default;
 }
+
+/* ══ VERSION BADGE ═══════════════════════════════════ */
+.version-badge {
+  font-family: var(--font-mono);
+  font-size: 9px; font-weight: 600; letter-spacing: 0.08em;
+  color: var(--chrome-text3);
+  background: var(--chrome-bg); border: 1px solid var(--chrome-border);
+  padding: 2px 7px; border-radius: 20px; margin-left: 2px;
+  user-select: none; transition: color var(--transition), border-color var(--transition);
+}
+.version-badge:hover { color: var(--accent); border-color: var(--accent); cursor: default; }
