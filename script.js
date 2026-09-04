@@ -1037,6 +1037,9 @@ function renderOutput() {
     treeOutput.style.display = 'block';
     textOutput.style.display = 'none';
     renderTree(state.blocks, treeOutput);
+    // ─── PERFORMANCE WARNING ─────────────────────────
+    showPerformanceWarning(totalNodes);
+    // ──────────────────────────────────────────────────
   } else {
     treeOutput.style.display = 'none';
     textOutput.style.display = 'block';
@@ -1650,3 +1653,29 @@ $('diffPopup').addEventListener('click', e => {
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && $('diffPopup').style.display !== 'none') closeDiffPopup();
 });
+
+/* ── PERFORMANCE WARNING ──────────────────────────── */
+function showPerformanceWarning(nodeCount) {
+  // Remove any existing warning
+  const oldWarn = document.querySelector('.performance-warning');
+  if (oldWarn) oldWarn.remove();
+
+  if (nodeCount > 10000) {
+    const warn = document.createElement('div');
+    warn.className = 'performance-warning';
+    warn.innerHTML = `
+      ⚡ Large dataset (${nodeCount.toLocaleString()} nodes).
+      Selection may be slow.
+      <button id="switchToTextBtn">Switch to Text view</button>
+    `;
+    const outputWrap = document.getElementById('outputWrap');
+    outputWrap.insertBefore(warn, outputWrap.firstChild);
+
+    // Bind the button
+    document.getElementById('switchToTextBtn')?.addEventListener('click', () => {
+      setView('text');
+      // Remove the warning after switching
+      warn.remove();
+    });
+  }
+}

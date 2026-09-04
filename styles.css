@@ -1,4 +1,4 @@
-/* DataLens v1.0.3 */
+/* DataLens v1.0.3 — performance & selection fixes */
 /* ═══════════════════════════════════════════════════════
    DataLens — Clean Viewer Theme
    Inspired by browser XML/JSON viewers:
@@ -416,6 +416,7 @@ kbd {
 
 .block-wrap { padding-left: 0; }
 
+/* ── Performance & selection optimisations ────────── */
 .tree-row {
   display: flex;
   align-items: baseline;
@@ -428,6 +429,18 @@ kbd {
   white-space: normal;
   position: relative;
   color: var(--out-text);
+  contain: layout style;          /* isolate layout */
+  user-select: none;              /* prevent selection on structural parts */
+}
+
+/* Only actual content is selectable */
+.tree-key,
+.tree-val,
+.xml-tagname,
+.xml-attr-name,
+.xml-attr-val,
+.xml-text-val {
+  user-select: text;
 }
 
 .tree-row:hover { background: var(--row-hover); }
@@ -441,6 +454,7 @@ kbd {
   flex-shrink: 0;
   align-self: stretch;
   min-height: 28px;
+  user-select: none;   /* not selectable */
 }
 .tree-line::before {
   content: '';
@@ -470,13 +484,17 @@ kbd {
   flex-shrink: 0; margin-right: 6px;
   align-self: center;
   transition: background var(--transition), border-color var(--transition), color var(--transition);
-  position: relative; z-index: 1; line-height: 1; user-select: none;
+  position: relative; z-index: 1; line-height: 1;
+  user-select: none;   /* prevent selection of toggle */
 }
 .toggle-btn:hover { background: var(--toggle-hover); border-color: var(--toggle-hover); color: #fff; }
 .toggle-btn.collapsed::after { content: '+'; }
 .toggle-btn.expanded::after  { content: '−'; }
 
-.tree-spacer { display: inline-block; width: 21px; flex-shrink: 0; }
+.tree-spacer {
+  display: inline-block; width: 21px; flex-shrink: 0;
+  user-select: none;
+}
 
 /* Keys */
 .tree-key {
@@ -489,7 +507,11 @@ kbd {
 .tree-key.text-key  { color: var(--syn-tag); font-style: italic; }
 .tree-key.index-key { color: var(--out-text3); font-weight: 400; }
 
-.tree-colon { color: var(--syn-punc); margin-right: 6px; }
+.tree-colon {
+  color: var(--syn-punc);
+  margin-right: 6px;
+  user-select: none;
+}
 
 /* Values */
 .tree-val {
@@ -510,6 +532,7 @@ kbd {
   font-size: 11.5px;
   margin-left: 6px;
   font-style: italic;
+  user-select: none;
 }
 
 /* Collapsed indicator */
@@ -875,7 +898,7 @@ mark.ts-active { background: #bee3f8; outline: 1px solid var(--accent); border-r
 }
 
 /* ══ XML TREE STYLES ═════════════════════════════════ */
-.xml-punct     { color: var(--syn-punc); }
+.xml-punct     { color: var(--syn-punc); user-select: none; }
 .xml-tagname   { color: var(--syn-tag); font-weight: 600; }
 .xml-attr-name { color: var(--syn-attr); }
 .xml-attr-val  { color: var(--syn-str); }
@@ -887,14 +910,12 @@ mark.ts-active { background: #bee3f8; outline: 1px solid var(--accent); border-r
   color: var(--out-text3);
   font-style: italic;
   font-size: 11.5px;
-  display: none;          /* hidden when expanded */
+  display: none;
+  user-select: none;
 }
 .tree-children.collapsed ~ * .xml-collapse-hint { display: inline; }
-/* simpler: show hint on the row itself when children collapsed */
 .tree-node > .tree-row .xml-collapse-hint { display: none; }
 .tree-node > .tree-children.collapsed + .xml-collapse-hint { display: inline; }
-
-/* Show hint when children are collapsed — target via JS class on row */
 .xml-row.has-children-collapsed .xml-collapse-hint { display: inline; }
 
 /* XML closing tag row — slightly dimmer */
@@ -987,3 +1008,30 @@ body.dark-mode .out-view-btn:hover { color: var(--out-text); }
   user-select: none; transition: color var(--transition), border-color var(--transition);
 }
 .version-badge:hover { color: var(--accent); border-color: var(--accent); cursor: default; }
+
+/* ══ PERFORMANCE WARNING BANNER (inside output) ═══════ */
+.performance-warning {
+  background: var(--amber);
+  color: #1a1d2e;
+  padding: 8px 16px;
+  font-size: 12px;
+  font-family: var(--font-ui);
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--out-border);
+  flex-shrink: 0;
+}
+.performance-warning button {
+  background: rgba(0,0,0,0.15);
+  border: none;
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.performance-warning button:hover {
+  background: rgba(0,0,0,0.25);
+}
