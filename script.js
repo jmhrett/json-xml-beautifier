@@ -1,4 +1,4 @@
-/* DataLens v1.0.3 */
+/* DataLens v1.0.4 */
 /* ═══════════════════════════════════════════════════════
    DataLens — JSON & XML Inspector  (resilient multi-block)
    ═══════════════════════════════════════════════════════ */
@@ -6,7 +6,7 @@
 'use strict';
 
 /* ── App version (update this on every release) ─────── */
-const APP_VERSION = 'v1.0.3';
+const APP_VERSION = 'v1.0.4';
 document.addEventListener('DOMContentLoaded', () => {
   const badge = document.getElementById('versionBadge');
   if (badge) badge.textContent = APP_VERSION;
@@ -714,6 +714,108 @@ function collapseAll() {
    MODULE: Text View — chunked, non-blocking
 ══════════════════════════════════════════════════════ */
 
+/* ══════════════════════════════════════════════════════
+   XML BEAUTIFIER & SYNTAX HIGHLIGHTER (text view)
+══════════════════════════════════════════════════════ */
+
+function beautifyXML(xmlString, indentSize) {
+  const doc = new DOMParser().parseFromString(xmlString, 'text/xml');
+  if (doc.querySelector('parsererror')) return xmlString;
+  const pad = ' '.repeat(indentSize);
+  return serializeNode(doc.documentElement, 0, pad);
+}
+
+function serializeNode(node, depth, pad) {
+  const indent = pad.repeat(depth);
+  if (node.nodeType === Node.TEXT_NODE) {
+    const v = node.nodeValue.replace(/^\s+|\s+$/g, '');
+    return v ? indent + escXml(v) : '';
+  }
+  if (node.nodeType === Node.CDATA_SECTION_NODE)
+    return indent + '<![CDATA[' + node.nodeValue + ']]>';
+  if (node.nodeType === Node.COMMENT_NODE)
+    return indent + '<!--' + node.nodeValue + '-->';
+  if (node.nodeType !== Node.ELEMENT_NODE) return '';
+
+  let open = indent + '<' + node.tagName;
+  for (const attr of node.attributes)
+    open += ' ' + attr.name + '="' + attr.value.replace(/"/g, '&quot;') + '"';
+
+  const children = Array.from(node.childNodes).filter(n =>
+    n.nodeType !== Node.TEXT_NODE || n.nodeValue.trim().length > 0);
+
+  if (children.length === 0) return open + ' />';
+  if (children.length === 1 && children[0].nodeType === Node.TEXT_NODE)
+    return open + '>' + escXml(children[0].nodeValue.trim()) + '</' + node.tagName + '>';
+
+  const lines = children.map(c => serializeNode(c, depth + 1, pad)).filter(Boolean);
+  return open + '>' + '\n' + lines.join('\n') + '\n' + indent + '</' + node.tagName + '>';
+}
+
+function escXml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function syntaxHighlightXML(str) {
+  let out = '', i = 0;
+  const n = str.length;
+  const e = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  while (i < n) {
+    if (str[i] !== '<') {
+      let j = i;
+      while (j < n && str[j] !== '<') j++;
+      out += e(str.slice(i, j));
+      i = j;
+      continue;
+    }
+    // comment
+    if (str.startsWith('<!--', i)) {
+      const end = str.indexOf('-->', i);
+      const to = end === -1 ? n : end + 3;
+      out += '<span class="sx-comment">' + e(str.slice(i, to)) + '</span>';
+      i = to; continue;
+    }
+    // CDATA
+    if (str.startsWith('<![CDATA[', i)) {
+      const end = str.indexOf(']]>', i);
+      const to = end === -1 ? n : end + 3;
+      out += '<span class="sx-cdata">' + e(str.slice(i, to)) + '</span>';
+      i = to; continue;
+    }
+    // find end of tag
+    let j = i + 1;
+    while (j < n && str[j] !== '>') {
+      if (str[j] === '"') { j++; while (j < n && str[j] !== '"') j++; }
+      j++;
+    }
+    const tag = str.slice(i, j + 1);
+    out += colorXMLTag(tag);
+    i = j + 1;
+  }
+  return out;
+}
+
+function colorXMLTag(raw) {
+  const e = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  if (raw.startsWith('</')) {
+    const name = raw.slice(2, -1).trim();
+    return '<span class="sx-tag">&lt;/</span><span class="sx-tagname">' + name + '</span><span class="sx-tag">&gt;</span>';
+  }
+  const selfClose = raw.endsWith('/>');
+  const inner = raw.slice(1, selfClose ? -2 : -1);
+  const nameMatch = inner.match(/^(\??)([\w:.-]+)/);
+  if (!nameMatch) return e(raw);
+  const [, pi, name] = nameMatch;
+  const rest = inner.slice(nameMatch[0].length);
+  const closeStr = selfClose ? ' />' : (pi ? '?>' : '>');
+  let out = '<span class="sx-tag">&lt;' + pi + '</span><span class="sx-tagname">' + name + '</span>';
+  out += rest.replace(/([\w:.-]+)="([^"]*)"/g, (_, k, v) =>
+    ' <span class="sx-attr-name">' + k + '</span><span class="sx-tag">=</span><span class="sx-attr-val">&quot;' + e(v) + '&quot;</span>');
+  out += '<span class="sx-tag">' + e(closeStr) + '</span>';
+  return out;
+}
+
+
 function renderTextView(blocks) {
   // For large data, cap the highlighted output size to avoid OOM
   const MAX_HIGHLIGHT_CHARS = 200_000;
@@ -1082,16 +1184,6 @@ function showEmpty() {
 function updateBadge(fmt) {
   formatBadge.textContent = fmt.toUpperCase();
   formatBadge.className   = 'format-badge ' + fmt;
-}
-
-function expandAll() {
-  treeOutput.querySelectorAll('.tree-children').forEach(el => el.classList.remove('collapsed'));
-  treeOutput.querySelectorAll('.toggle-btn').forEach(btn => btn.classList.replace('collapsed','expanded'));
-}
-
-function collapseAll() {
-  treeOutput.querySelectorAll('.tree-children').forEach(el => el.classList.add('collapsed'));
-  treeOutput.querySelectorAll('.toggle-btn').forEach(btn => btn.classList.replace('expanded','collapsed'));
 }
 
 function copyOutput() {

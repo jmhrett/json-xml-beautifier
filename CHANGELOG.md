@@ -62,5 +62,20 @@ Full-featured JSON & XML inspector with:
 - `expandAll` / `collapseAll` simplified — just toggle CSS class on all `.tree-children`.
 - Search ancestor-expand no longer references removed lazy functions.
 
+## v1.0.4 — Bug Fix (2026-08-13)
+
+### Fixed
+- **Text view showing empty data** — two functions were missing entirely from the file:
+  `beautifyXML` and `syntaxHighlightXML`. When the tree renderer was rewritten in
+  v1.0.3, the file was split and reassembled — the XML text-view module fell between
+  the split boundaries and was dropped. `renderTextView` called these functions, got
+  `undefined is not a function`, and produced no output.
+  Fix: re-inserted `beautifyXML`, `serializeNode`, `escXml`, `syntaxHighlightXML`,
+  `colorXMLTag` at the correct location before `renderTextView`.
+- **Duplicate `expandAll` / `collapseAll`** — two definitions existed (lines 700 and
+  1189). The second (weaker) definition shadowed the first in strict engines. Removed
+  the duplicate from the event-wiring section; the canonical definitions in the tree
+  renderer module are kept.
+
 ---
 <!-- New entries go above this line, newest first -->
